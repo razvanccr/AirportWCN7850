@@ -75,6 +75,12 @@ build_kext() {
             | grep -vE '^_timingsafe_bcmp$' || true)   # itl80211/openbsd/net80211/_string.c, as in itlwm
     [ -z "$clash" ] || { echo "STOP: $NAME defines kernel symbols: $clash"; exit 1; }
   fi
+  # A kext leaves its imports for the kernel to resolve at boot, so a wrong
+  # prototype for one of our own functions only shows up as a kext the kernel
+  # silently refuses to load. Nothing in our namespace may be undefined.
+  local undef
+  undef=$(nm -u "$KEXT/Contents/MacOS/$NAME" | grep -E '^_(qwz_|Qwz)|^__Z[0-9]+(qwz_|Qwz)' || true)
+  [ -z "$undef" ] || { echo "STOP: $NAME leaves our own symbols unresolved (prototype mismatch?):"; echo "$undef"; exit 1; }
   sed "s/@VERSION@/$VERSION/g" "$PLIST" > "$KEXT/Contents/Info.plist"
   echo "$NAME $VERSION $(shasum -a 256 "$KEXT/Contents/MacOS/$NAME" | cut -c1-8) $(stat -f %z "$KEXT/Contents/MacOS/$NAME") B -> $KEXT"
 }

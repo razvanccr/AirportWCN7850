@@ -5,6 +5,9 @@
  */
 #include "qwz_sysctl.h"
 #include "qwz_log.h"
+#include "qwz_mon.h"
+
+#include <IOKit/IOLib.h>
 
 #include <sys/types.h>
 #include <sys/errno.h>
@@ -66,7 +69,68 @@ qwz_sysctl_logfile(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_
 	return 0;
 }
 
+/* debug.qwz.mon: channel while capturing; write a channel to start, 0 to stop. */
+static int
+qwz_sysctl_mon(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req)
+{
+	int v = qwz_mon_status();
+	int err = sysctl_handle_int(oidp, &v, 0, req);
+
+	if (err || req->newptr == USER_ADDR_NULL)
+		return err;
+	return qwz_mon_set(v);
+}
+
+/* debug.qwz.montx: M1 transmit ops (bit 1 broadcast once, 2 auto reply, 4 unicast once). */
+static int
+qwz_sysctl_montx(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req)
+{
+	int v = (int)qwz_mon_tx_mode;
+	int err = sysctl_handle_int(oidp, &v, 0, req);
+
+	if (err || req->newptr == USER_ADDR_NULL)
+		return err;
+	return qwz_mon_tx(v);
+}
+
+/* debug.qwz.moncap: drains the capture ring as a stream of qwz_moncap_hdr records. */
+static int
+qwz_sysctl_moncap(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req)
+{
+	const size_t MAX = 1024 * 1024;
+	size_t avail = qwz_mon_cap_pending(), max, n;
+	void *buf;
+	int err;
+
+	if (req->newptr != USER_ADDR_NULL)
+		return EPERM;
+	if (req->oldptr == USER_ADDR_NULL) {
+		req->oldidx = avail;
+		return 0;
+	}
+	max = req->oldlen < MAX ? req->oldlen : MAX;
+	if (max == 0)
+		return 0;
+	buf = IOMalloc(max);
+	if (buf == NULL)
+		return ENOMEM;
+	n = qwz_mon_cap_drain(buf, max);
+	err = n ? SYSCTL_OUT(req, buf, n) : 0;
+	IOFree(buf, max);
+	return err;
+}
+
 SYSCTL_NODE(_debug, OID_AUTO, qwz, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "QwzMac");
+SYSCTL_PROC(_debug_qwz, OID_AUTO, mon, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, qwz_sysctl_mon, "I", "monitor-mode capture: channel to start, 0 to stop (Wi-Fi must be off)");
+SYSCTL_UINT(_debug_qwz, OID_AUTO, monflags, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &qwz_mon_flags, 0, "monitor-mode experiment flags (QWZ_MON_F_* in qwz_mon.h)");
+SYSCTL_PROC(_debug_qwz, OID_AUTO, montx, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, qwz_sysctl_montx, "I", "monitor-mode transmit: 1 broadcast PSF copy once, 2 auto unicast reply, 4 unicast once");
+SYSCTL_STRING(_debug_qwz, OID_AUTO, monbssid, CTLFLAG_RW | CTLFLAG_LOCKED,
+    qwz_mon_bssid_str, sizeof(qwz_mon_bssid_str), "BSSID the monitor vdev comes up with (xx:xx:xx:xx:xx:xx; empty: own MAC)");
+SYSCTL_PROC(_debug_qwz, OID_AUTO, moncap, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED,
+    0, 0, qwz_sysctl_moncap, "S", "drain captured frames (scripts/qwz-moncap.py)");
 SYSCTL_PROC(_debug_qwz, OID_AUTO, start, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     0, 0, qwz_sysctl_start, "I", "write 1 to run the bring-up");
 SYSCTL_INT(_debug_qwz, OID_AUTO, stage, CTLFLAG_RW | CTLFLAG_LOCKED,
@@ -93,6 +157,11 @@ qwz_sysctl_register(qwz_sysctl_start_fn start, void *arg)
 	sysctl_register_oid(&sysctl__debug_qwz_stage);
 	sysctl_register_oid(&sysctl__debug_qwz_publish);
 	sysctl_register_oid(&sysctl__debug_qwz_logfile);
+	sysctl_register_oid(&sysctl__debug_qwz_mon);
+	sysctl_register_oid(&sysctl__debug_qwz_monflags);
+	sysctl_register_oid(&sysctl__debug_qwz_monbssid);
+	sysctl_register_oid(&sysctl__debug_qwz_montx);
+	sysctl_register_oid(&sysctl__debug_qwz_moncap);
 #ifdef QWZ_DEBUG
 	sysctl_register_oid(&sysctl__debug_qwz_debug);
 #endif
@@ -109,6 +178,11 @@ qwz_sysctl_unregister(void)
 #ifdef QWZ_DEBUG
 	sysctl_unregister_oid(&sysctl__debug_qwz_debug);
 #endif
+	sysctl_unregister_oid(&sysctl__debug_qwz_moncap);
+	sysctl_unregister_oid(&sysctl__debug_qwz_montx);
+	sysctl_unregister_oid(&sysctl__debug_qwz_monbssid);
+	sysctl_unregister_oid(&sysctl__debug_qwz_monflags);
+	sysctl_unregister_oid(&sysctl__debug_qwz_mon);
 	sysctl_unregister_oid(&sysctl__debug_qwz_logfile);
 	sysctl_unregister_oid(&sysctl__debug_qwz_publish);
 	sysctl_unregister_oid(&sysctl__debug_qwz_stage);

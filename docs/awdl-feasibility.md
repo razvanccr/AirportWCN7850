@@ -4,6 +4,12 @@ Written 2026-10-17 against macOS 26.7.1 (IO80211Family 1200.13.1), the WCL build
 `AirportWCN7850.kext`, OpenBSD `qwz(4)` as mirrored in `qwz/`, and Linux ath12k.
 Research only; no driver code was written for it.
 
+> **Revisited 2026-11-01.** The timing analysis below still holds for a
+> hopping AWDL node, but a node that stays on one social channel needs none
+> of it, and that mode has since worked on a WCN7850 under Linux (owly
+> exclusive mode, issue 40). See [airdrop-revisited.md](airdrop-revisited.md)
+> for the updated verdict and plan.
+
 ## Verdict: no-go
 
 AirDrop needs AWDL, and AWDL needs a radio that hops between three social

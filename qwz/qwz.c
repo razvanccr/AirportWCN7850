@@ -55,6 +55,7 @@
  */
 
 #include "qwz_compat.h"	/* macOS: replaces the OpenBSD kernel headers */
+#include "qwz_mon.h"	/* monitor-mode capture (debug.qwz.mon) */
 #define QWZ_TRACE(fmt, ...)	qwz_log("qwz: trace: " fmt "\n", ##__VA_ARGS__)
 #ifdef AIRPORT_WCL
 #include "WCL/WCL.hpp"	/* AirportWCN7850: scan helpers (scanUsesProbes, scanChannelSelected) */
@@ -320,6 +321,10 @@ qwz_init(struct ifnet *ifp)
 	struct qwz_softc *sc = (struct qwz_softc *)(ifp->if_softc);
 	struct ieee80211com *ic = &sc->sc_ic;
 	int s = splnet();
+
+	/* Wi-Fi coming back ends a monitor-mode capture (qwz_mon.c). */
+	if (sc->mon_active)
+		qwz_mon_stop(sc);
 
 #ifdef __APPLE__
 	/*
@@ -12094,6 +12099,13 @@ qwz_mgmt_rx_event(struct qwz_softc *sc, struct mbuf *m)
 	status->rate_idx = ath12k_mac_bitrate_to_idx(sband, rx_ev.rate / 100);
 #endif
 
+	/* Monitor-mode capture (qwz_mon.c): the interface is down, keep the frame. */
+	if (sc->mon_active) {
+		qwz_mon_capture_mgmt_mbuf(sc, m, rxi.rxi_rssi, rx_ev.rate);
+		m_freem(m);
+		goto exit;
+	}
+
 	wh = mtod(m, struct ieee80211_frame *);
 	ni = ieee80211_find_rxnode(ic, wh);
 #if 0
@@ -12203,6 +12215,8 @@ qwz_wmi_process_mgmt_tx_comp(struct qwz_softc *sc,
 	struct ifnet *ifp = &ic->ic_if;
 	struct qwz_tx_data *tx_data;
 
+	if (qwz_mon_tx_compl(sc, tx_compl_param))	/* monitor-mode transmit (qwz_mon.c) */
+		return;
 	if (tx_compl_param->desc_id >= nitems(arvif->txmgmt.data)) {
 		printf("%s: received mgmt tx compl for invalid buf_id: %d\n",
 		    sc->sc_dev.dv_xname, tx_compl_param->desc_id);
@@ -14179,9 +14193,33 @@ qwz_dp_tx_htt_rx_filter_setup(struct qwz_softc *sc, uint32_t ring_id,
 	cmd->info0 |= FIELD_PREP(
 	    HTT_RX_RING_SELECTION_CFG_CMD_INFO0_OFFSET_VALID,
 	    !!tlv_filter->offset_valid);
+	/* Monitor-mode bits (zero for the station filter, as before). */
+	cmd->info0 |= FIELD_PREP(
+	    HTT_RX_RING_SELECTION_CFG_CMD_INFO0_DROP_THRES_VAL,
+	    !!tlv_filter->drop_threshold_valid);
+	cmd->info0 |= FIELD_PREP(HTT_RX_RING_SELECTION_CFG_CMD_INFO0_EN_RXMON,
+	    !!tlv_filter->en_rxmon);
 
 	cmd->info1 = FIELD_PREP(HTT_RX_RING_SELECTION_CFG_CMD_INFO1_BUF_SIZE,
 	    rx_buf_size);
+	cmd->info1 |= FIELD_PREP(HTT_RX_RING_SELECTION_CFG_CMD_INFO1_CONF_LEN_MGMT,
+	    tlv_filter->conf_len_mgmt);
+	cmd->info1 |= FIELD_PREP(HTT_RX_RING_SELECTION_CFG_CMD_INFO1_CONF_LEN_CTRL,
+	    tlv_filter->conf_len_ctrl);
+	cmd->info1 |= FIELD_PREP(HTT_RX_RING_SELECTION_CFG_CMD_INFO1_CONF_LEN_DATA,
+	    tlv_filter->conf_len_data);
+	cmd->info2 = FIELD_PREP(HTT_RX_RING_SELECTION_CFG_CMD_INFO2_DROP_THRESHOLD,
+	    tlv_filter->rx_drop_threshold);
+	cmd->info2 |= FIELD_PREP(HTT_RX_RING_SELECTION_CFG_CMD_INFO2_EN_LOG_MGMT_TYPE,
+	    !!tlv_filter->enable_log_mgmt_type);
+	cmd->info2 |= FIELD_PREP(HTT_RX_RING_SELECTION_CFG_CMD_INFO2_EN_CTRL_TYPE,
+	    !!tlv_filter->enable_log_ctrl_type);
+	cmd->info2 |= FIELD_PREP(HTT_RX_RING_SELECTION_CFG_CMD_INFO2_EN_LOG_DATA_TYPE,
+	    !!tlv_filter->enable_log_data_type);
+	cmd->info3 = FIELD_PREP(HTT_RX_RING_SELECTION_CFG_CMD_INFO3_EN_TLV_PKT_OFFSET,
+	    !!tlv_filter->enable_rx_tlv_offset);
+	cmd->info3 |= FIELD_PREP(HTT_RX_RING_SELECTION_CFG_CMD_INFO3_PKT_TLV_OFFSET,
+	    tlv_filter->rx_tlv_offset);
 	cmd->pkt_type_en_flags0 = tlv_filter->pkt_filter_flags0;
 	cmd->pkt_type_en_flags1 = tlv_filter->pkt_filter_flags1;
 	cmd->pkt_type_en_flags2 = tlv_filter->pkt_filter_flags2;
@@ -15149,6 +15187,8 @@ qwz_dp_process_rx_err(struct qwz_softc *sc)
 		qwz_dp_rxbufs_replenish(sc, &dp->rx_refill_buf_ring,
 		    &used_list, num_buffs_reaped);
 	ifp->if_ierrors += num_buffs_reaped;
+	if (sc->mon_active)
+		sc->mon_stats.reo_err += num_buffs_reaped;
 	return num_buffs_reaped;
 }
 
@@ -15357,6 +15397,8 @@ qwz_dp_rx_process_wbm_err(struct qwz_softc *sc)
 	if (num_buffs_reaped)
 		qwz_dp_rxbufs_replenish(sc, &dp->rx_refill_buf_ring,
 		    &used_list, num_buffs_reaped);
+	if (sc->mon_active)
+		sc->mon_stats.wbm_err += num_buffs_reaped;
 
 	return num_buffs_reaped;
 }
@@ -15902,7 +15944,7 @@ qwz_dp_rx_process_msdu(struct qwz_softc *sc, struct qwz_rx_msdu *msdu,
 	}
 
 	/* Drop non-802.11 frames (e.g. WCN7850 FW internal messages). */
-	if (!sc->hal_rx_ops->rx_desc_get_mpdu_fc_valid(rx_desc))
+	if (!sc->hal_rx_ops->rx_desc_get_mpdu_fc_valid(rx_desc) && !sc->mon_active)
 		return EIO;
 
 	/*
@@ -15915,7 +15957,7 @@ qwz_dp_rx_process_msdu(struct qwz_softc *sc, struct qwz_rx_msdu *msdu,
 	if (mpdu->addr1[4] == 0x84 && mpdu->addr1[5] == 0xe1)
 		return EIO;
 	if (!(mpdu->addr1[0] & 0x01) &&
-	    !IEEE80211_ADDR_EQ(mpdu->addr1, sc->sc_ic.ic_myaddr))
+	    !IEEE80211_ADDR_EQ(mpdu->addr1, sc->sc_ic.ic_myaddr) && !sc->mon_active)
 		return EIO;
 
 	msdu->rx_desc = rx_desc;
@@ -16077,6 +16119,13 @@ qwz_dp_rx_process_received_packets(struct qwz_softc *sc,
 			continue;
 		}
 
+		if (sc->mon_active && (qwz_mon_flags & QWZ_MON_F_REO)) {
+			/* Monitor-mode capture: keep the frame, nothing is up to take it. */
+			qwz_mon_capture_reo_mbuf(sc, msdu->m);
+			m_freem(msdu->m);
+			msdu->m = NULL;
+			continue;
+		}
 		qwz_dp_rx_deliver_msdu(sc, msdu);
 		msdu->m = NULL;
 	}
@@ -25940,6 +25989,7 @@ qwz_attach(struct qwz_softc *sc)
 
 	TAILQ_INIT(&sc->peers);
 	sc->bss_peer_id = HAL_INVALID_PEERID;
+	qwz_mon_attach(sc);
 
 	error = qwz_init(ifp);
 	if (error)

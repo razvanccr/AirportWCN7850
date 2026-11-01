@@ -100,6 +100,12 @@ qwz_compat_set_gate(IOCommandGate *gate)
 	qwz_gate = gate;
 }
 
+IOCommandGate *
+qwz_compat_gate(void)
+{
+	return qwz_gate;
+}
+
 /*
  * Sleep on `ident`, releasing the gate while asleep. Only legal from a thread
  * that holds the gate and is not the workloop thread itself; OpenBSD forbids

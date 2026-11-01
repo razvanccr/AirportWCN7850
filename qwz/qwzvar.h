@@ -2143,6 +2143,25 @@ struct qwz_softc {
 	qwz_timeout_t			 mon_reap_timer;
 #define ATH12K_MON_TIMER_INTERVAL	10
 
+	/* qwz_mon.c: monitor-mode capture (debug.qwz.mon). */
+	struct qwz_vif			 sc_monvif;
+	int				 mon_active;
+	int				 mon_chan;
+	uint32_t			 mon_freq;
+	int				 mon_bssid_set;
+	uint8_t				 mon_bssid[IEEE80211_ADDR_LEN];
+	int				 mon_self_peer;	/* AP vdev's own peer entry exists */
+	int				 mon_sender_peer;	/* raw firmware peer for mon_sender_addr */
+	uint8_t				 mon_sender_addr[IEEE80211_ADDR_LEN];
+	struct {
+		uint32_t entries, mpdus, frames, bufs, mgmt;
+		uint32_t reo, reo_err, wbm_err;
+		uint32_t rx_psf, tx_sent, tx_fail, tx_ok, tx_discard, tx_inspect, tx_noack, tx_other;
+		int32_t last_ack_rssi;
+		uint32_t badcookie, nolink, duplink, linkret_fail;
+		uint64_t last_log;
+	} mon_stats;
+
 	/* Provided by attachment driver: */
 	struct qwz_ops			ops;
 	bus_dma_tag_t			sc_dmat;

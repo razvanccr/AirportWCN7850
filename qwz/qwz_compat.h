@@ -144,6 +144,7 @@ struct device {
 /* ---- sleep / wakeup / spl (see the concurrency note above) ----------- */
 
 void	qwz_compat_set_gate(IOCommandGate *);
+IOCommandGate *qwz_compat_gate(void);	/* NULL before the HAL attached */
 void	qwz_compat_init(void);	/* before attach */
 void	qwz_compat_fini(void);	/* after detach */
 void	qwz_pci_unmap_bar(void);

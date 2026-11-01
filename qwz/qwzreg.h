@@ -12943,6 +12943,7 @@ enum htt_rx_filter_tlv_flags {
 	HTT_RX_FILTER_TLV_FLAGS_PPDU_END_USER_STATS	= BIT(10),
 	HTT_RX_FILTER_TLV_FLAGS_PPDU_END_USER_STATS_EXT	= BIT(11),
 	HTT_RX_FILTER_TLV_FLAGS_PPDU_END_STATUS_DONE	= BIT(12),
+	HTT_RX_FILTER_TLV_FLAGS_PPDU_START_USER_INFO	= BIT(13),
 };
 
 enum htt_rx_mgmt_pkt_filter_tlv_flags0 {
@@ -13221,6 +13222,23 @@ enum htt_rx_data_pkt_filter_tlv_flasg3 {
 		HTT_RX_FILTER_TLV_FLAGS_PPDU_END_USER_STATS_EXT | \
 		HTT_RX_FILTER_TLV_FLAGS_PPDU_END_STATUS_DONE)
 
+/* Linux ath12k: the filter the RXDMA buffer rings get while a monitor
+ * vdev is up on a chip without rxdma1 (WCN7850). */
+#define HTT_RX_MON_FILTER_TLV_FLAGS_MON_DEST_RING \
+		(HTT_RX_FILTER_TLV_FLAGS_MPDU_START | \
+		HTT_RX_FILTER_TLV_FLAGS_MSDU_START | \
+		HTT_RX_FILTER_TLV_FLAGS_RX_PACKET | \
+		HTT_RX_FILTER_TLV_FLAGS_MSDU_END | \
+		HTT_RX_FILTER_TLV_FLAGS_MPDU_END | \
+		HTT_RX_FILTER_TLV_FLAGS_PACKET_HEADER | \
+		HTT_RX_FILTER_TLV_FLAGS_PER_MSDU_HEADER | \
+		HTT_RX_FILTER_TLV_FLAGS_PPDU_START | \
+		HTT_RX_FILTER_TLV_FLAGS_PPDU_END | \
+		HTT_RX_FILTER_TLV_FLAGS_PPDU_END_USER_STATS | \
+		HTT_RX_FILTER_TLV_FLAGS_PPDU_END_USER_STATS_EXT | \
+		HTT_RX_FILTER_TLV_FLAGS_PPDU_END_STATUS_DONE | \
+		HTT_RX_FILTER_TLV_FLAGS_PPDU_START_USER_INFO)
+
 #define HTT_RX_MON_FILTER_TLV_FLAGS_MON_BUF_RING \
 		(HTT_RX_FILTER_TLV_FLAGS_MPDU_START | \
 		HTT_RX_FILTER_TLV_FLAGS_MSDU_START | \
@@ -13264,7 +13282,23 @@ struct htt_rx_ring_tlv_filter {
 	uint16_t rx_msdu_end_offset;
 	uint16_t rx_msdu_start_offset;
 	uint16_t rx_attn_offset;
+	/* Monitor-mode fields of the newer command (ath12k dp_htt.h). */
+	int drop_threshold_valid;
+	int en_rxmon;			/* HTT_RX_RING_SELECTION_CFG_CMD_INFO0_EN_RXMON */
+	uint16_t rx_drop_threshold;
+	uint8_t conf_len_mgmt;
+	uint8_t conf_len_ctrl;
+	uint8_t conf_len_data;
+	int enable_log_mgmt_type;
+	int enable_log_ctrl_type;
+	int enable_log_data_type;
+	int enable_rx_tlv_offset;
+	uint16_t rx_tlv_offset;
 };
+
+#define HTT_RX_RING_TLV_DROP_THRESHOLD_VALUE	32
+#define HTT_RX_RING_DEFAULT_DMA_LENGTH		0x7
+#define HTT_RX_RING_PKT_TLV_OFFSET		0x1
 
 #define HTT_RX_FULL_MON_MODE_CFG_CMD_INFO0_MSG_TYPE	GENMASK(7, 0)
 #define HTT_RX_FULL_MON_MODE_CFG_CMD_INFO0_PDEV_ID	GENMASK(15, 8)
