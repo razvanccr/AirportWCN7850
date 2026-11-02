@@ -891,8 +891,16 @@ iPhone; photos shared from the iPhone land in Downloads without a
 prompt, three in a row. Terminal.app matters: the receiver needs the
 Local Network permission, which a shell inside another app lacks.
 
-A multi-file share then sat on "Waiting" with no trace on the receiver.
-The receiver dropped a sender's fifth connection silently once four
-earlier ones were still open (an iPhone keeps them between transfers);
-owly 5c815b9 replaces the quietest idle one instead and logs refusals.
-Whether that was the whole story is the next test.
+A multi-file share then sat on "Waiting". With refusals logged (owly
+5e97688) the cause was plain: the iPhone names each file of a multi-file
+share `./NSIRD_AirDrop_<6 chars>/<FileName>`, a wrapper directory per
+file, and owly's ASK-5 rule demanded `./<FileName>`, answering 400. owly
+88672dd accepts the wrapped form, writes the wrapper nowhere and lands
+each file under its own name (spec ASK-5a). Verified: several photos
+from the iPhone land in Downloads in one go. Along the way 5c815b9 made
+the per-address connection bound evict a sender's quietest idle
+connection instead of silently refusing it (an iPhone keeps earlier
+connections open between transfers).
+
+State at the end of the day: AirDrop works in both directions from one
+command, single and multiple files; nothing pushed.
