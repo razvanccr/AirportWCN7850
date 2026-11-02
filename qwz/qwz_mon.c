@@ -66,6 +66,8 @@ extern "C" {
 #endif
 extern errno_t ifnet_set_eflags(ifnet_t, u_int32_t new_flags, u_int32_t mask);
 extern u_int32_t ifnet_eflags(ifnet_t);
+/* xnu: the delegate lends its family/subfamily to IFNET_IS_WIFI() & co. */
+extern errno_t ifnet_set_delegate(ifnet_t, ifnet_t delegated);
 #ifdef __cplusplus
 }
 #endif
@@ -74,25 +76,53 @@ extern u_int32_t ifnet_eflags(ifnet_t);
 int
 qwz_mon_awdlif(const char *cmd)
 {
-	ifnet_t ifp;
-	const char *name = cmd;
+	ifnet_t ifp, dlg = NULL;
+	char name[IFNAMSIZ], dname[IFNAMSIZ];
+	const char *p = cmd, *eq;
 	int clear = 0, err;
+	size_t n;
 	u_int32_t before, after;
 
-	if (name[0] == '-') {
+	/* "feth0", "feth0=en3" (delegate to the Wi-Fi interface too), "-feth0". */
+	if (p[0] == '-') {
 		clear = 1;
-		name++;
+		p++;
 	}
-	if (name[0] == 0)
+	eq = strchr(p, '=');
+	n = eq ? (size_t)(eq - p) : strlen(p);
+	if (n == 0 || n >= sizeof(name))
 		return EINVAL;
+	memcpy(name, p, n);
+	name[n] = 0;
+	dname[0] = 0;
+	if (eq && !clear) {
+		if (strlen(eq + 1) == 0 || strlen(eq + 1) >= sizeof(dname))
+			return EINVAL;
+		strlcpy(dname, eq + 1, sizeof(dname));
+	}
 	err = ifnet_find_by_name(name, &ifp);
 	if (err)
 		return err;
+	if (dname[0] != 0) {
+		err = ifnet_find_by_name(dname, &dlg);
+		if (err) {
+			ifnet_release(ifp);
+			return err;
+		}
+	}
+	if (clear)
+		(void)ifnet_set_delegate(ifp, NULL);
+	else if (dlg != NULL) {
+		err = ifnet_set_delegate(ifp, dlg);
+		printf("qwz: mon: awdlif %s: delegate %s -> %d\n", name, dname, err);
+	}
 	before = ifnet_eflags(ifp);
 	err = ifnet_set_eflags(ifp, clear ? 0 : QWZ_IFEF_AWDL, QWZ_IFEF_AWDL);
 	after = ifnet_eflags(ifp);
 	printf("qwz: mon: awdlif %s: %s IFEF_AWDL -> %d, eflags 0x%08x -> 0x%08x\n",
 	    name, clear ? "clear" : "set", err, before, after);
+	if (dlg != NULL)
+		ifnet_release(dlg);
 	ifnet_release(ifp);
 	return err;
 }
@@ -928,7 +958,11 @@ qwz_mon_vdev_create(struct qwz_softc *sc)
 	vif->vdev_type = (qwz_mon_flags & QWZ_MON_F_AP) ? WMI_VDEV_TYPE_AP : WMI_VDEV_TYPE_MONITOR;
 	vif->vdev_subtype = WMI_VDEV_SUBTYPE_NONE;
 	vif->bank_id = -1;
-	IEEE80211_ADDR_COPY(vif->vdev_addr, ic->ic_myaddr);
+	/* The card's own address, not the interface's: macOS gives the station
+	 * a private (random) address when Wi-Fi comes on, and an AWDL address
+	 * that changes between runs leaves phones with stale records
+	 * (Mac-Pro.local resolving to the previous link-local). */
+	IEEE80211_ADDR_COPY(vif->vdev_addr, sc->mac_addr);
 	if ((qwz_mon_flags & QWZ_MON_F_BSSID_MAC) && sc->mon_bssid_set)
 		IEEE80211_ADDR_COPY(vif->vdev_addr, sc->mon_bssid);
 

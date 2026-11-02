@@ -715,3 +715,111 @@ accept a connection that does not arrive on an AWDL functional-type
 interface? If it does, the `awdl0` ifnet is only needed for the record
 publication, and a simpler route (publishing sharingd's record from
 userspace, with a copy of its TXT) might do.
+
+## M4: the kext's own awdl0 (2026-11-02, morning)
+
+Native receiving needs the kernel to see a real AWDL interface: the tcpdump
+check settled that sharingd's listener resets every connection that arrives
+on anything else (SYN every 5 s from the phone to port 8770 on feth0, RST
+from the Mac each time), and a feth cannot become one: `IFEF_AWDL` plus a
+delegate to the Wi-Fi interface (kext `debug.qwz.awdlif=feth0=en3`, both
+calls succeed, eflags 0x401f0080) still leaves mDNSResponder publishing
+sharingd's record on loopback and the resets in place. So `qwz_awdl.c`
+allocates one: `ifnet_allocate_extended` (struct version 2, legacy output
+model, `IFNET_INIT_NX_NOAUTO`), family Ethernet, subfamily Wi-Fi, type
+Ethernet, name `awdl0`, the Ethernet demux/proto/framer KPIs, BPF attached,
+`IFEF_AWDL` set after attach (xnu adds LOCALNET_PRIVATE, ND6ALT and
+RESTRICTED_RECV). Packets: the stack's output goes into a ring drained by
+`debug.qwz.awdltx`; frames from the air come in through `debug.qwz.awdlrx`
+and `ifnet_input`. The daemon's `--awdl0` runs the node over the two
+sysctls (`awdl.rs`), no feth pair, no BPF.
+
+What it took to get stable:
+
+- Two kernel freezes, no panic report. Fixes: no Skywalk nexus
+  auto-attached (the first build had one and `CHANNEL_IO`), no flag changes
+  inside the ioctl handler, and the real bug: the injected mbuf's buffer
+  length was its capacity, not the frame, so the stack read past the frame.
+  Chained buffers are handled through `mbuf_copyback`/`mbuf_adj`;
+  rejections are counted by cause in `debug.qwz.awdl0`.
+- Inbound multicast was dropped unless tcpdump had the interface in
+  promiscuous mode (the user noticed discovery only worked with a capture
+  running): the driver must set M_MCAST/M_BCAST on inbound frames for
+  `ether_demux`. Build fb0fb545 does; until it is installed, a running
+  `tcpdump -i awdl0` is the workaround.
+- The daemon's `ndp -s` took five seconds a call (name lookups) and froze
+  the node, which timed out its other peer: with two Apple devices around
+  the peers knocked each other out every five seconds. Now `ndp -n`, off
+  the node's thread.
+
+What works with it: `ifconfig -v awdl0` says `type: Wi-Fi` with the AWDL
+eflags; mDNSResponder publishes sharingd's `_airdrop._tcp` record on it
+(interface 15, and resolves on it: "ifindex: 15" in its log); the iPhone's
+share sheet lists "Mac-Pro"; sharingd accepts the phone's connections;
+rapportd and the phone open TLS 1.3 sessions both ways over the link (seven
+established connections at once). Native sending from the AirDrop window
+keeps working.
+
+What does not, yet: iOS 26's "AirDrop Code Required" step. The phone asks
+for a six-digit code "from Mac Pro" and the Mac never shows one; its
+rapportd pair-verify towards the phone ends with the phone resetting the
+connection after the TLS handshake ("PairVerify error", "Missing ContactID
+From Endpoints"). Whether that is the link (frames lost or reordered mid
+exchange), a Hackintosh identity problem (no trusted device identity for
+the pairing), or the code UI needing something else, is open. A contact
+path (the Mac's Apple ID in the phone's contacts) would bypass the code.
+
+Later that morning: with the multicast marks (fb0fb545) the phone lists the
+Mac every time, and a capture of its pairing connection shows where the code
+step dies: the TLS handshake with rapportd on port 60189 completes, then
+the phone's first 274-byte record is retransmitted every two seconds and the
+Mac's TCP acknowledges only the byte before it, with no checksum error
+counted. The segments were lost between `ifnet_input` and TCP; the session
+had used the chained-buffer injection path 92 times. bc192697 injects every
+frame in a single buffer (`mbuf_allocpacket` with one chunk) and pins the
+capture vdev, and so the AWDL address, to the card's permanent MAC (the
+address had alternated with macOS's private Wi-Fi address between runs,
+leaving phones with stale records).
+
+With bc192697 (single-buffer injection, pinned address) the link is clean:
+no rejected frames, no retransmission storms, the phone lists the Mac as
+"catalinr" every time, opens two pairing connections into the Mac's
+sharing service, goes to "Waiting..." and gets declined, with no prompt on
+the Mac and no incoming AirDrop request in sharingd's log at all. The
+decline happens inside the pairing stage that iOS 26 runs before the
+AirDrop request proper (rapportd; "Missing ContactID From Endpoints", "No
+PIN info found in TXT record"). Both devices use the same Apple Account,
+so a healthy pair would skip the code and prompt entirely: the phone
+treating the Mac as a stranger means the Mac's AirDrop identity does not
+verify, which on a Hackintosh is the iMessage/IDS story (sharingd logged
+"IDS Request to block until connected"), not the link. Where M4 stands:
+the radio, the AWDL node and the kernel interface carry Apple's own
+AirDrop end to end; what is left is the Mac's identity with Apple's
+services.
+
+The transfer stage (2026-11-02, noon): after the pairing, rapportd hands
+the phone the Mac's transfer endpoint, `_asquic._udp` (QUIC over UDP, port
+49453 here), which sharingd publishes on the LAN interface and loopback
+only; the phone's datagrams then reach awdl0 and find no socket (UDP "no
+socket" drops climb), and the phone reports a decline. Network.framework
+listeners bind to interfaces with a Skywalk netif nexus, which awdl0 lacks
+(NX_NOAUTO). Build 585aecef re-allows the nexus on request ("nexus:" in
+the create string, daemon `--nexus`): with it the kernel no longer froze
+(so the earlier freezes were the mbuf bug), the netif attached, mDNS flowed
+both ways on the capture, but the phone never listed the Mac again, so the
+nexus-attached legacy interface mangles something on the way to the air.
+A Skywalk-native awdl0 would be the proper answer; the cheap experiment
+first is the non-nexus mode with the Ethernet interface down
+(`lan-off-test.sh`), so sharingd has no LAN interface to prefer.
+
+Ethernet-down test (12:55-12:57): with en0 down for two minutes and the
+phone sending, the phone sat at "Waiting..." again and the UDP "no socket"
+counter barely moved, so this time its datagrams did not even land on
+awdl0; sharingd's `_asquic._udp` was back on loopback and en0 as soon as
+Ethernet returned, and where it was during the window is unknown (the
+samples missed it). Inconclusive, and not the lever: sharingd's choice of
+transfer interface is made from what Network.framework considers viable,
+and a legacy ifnet without a Skywalk nexus is not. Native receiving on
+iOS 26 therefore ends at the transfer stage until awdl0 is a
+Skywalk-native interface (or the nexus-attached legacy path is made to
+carry frames intact). Everything before that stage works natively.

@@ -6,6 +6,7 @@
 #include "qwz_sysctl.h"
 #include "qwz_log.h"
 #include "qwz_mon.h"
+#include "qwz_awdl.h"
 
 #include <IOKit/IOLib.h>
 
@@ -169,6 +170,77 @@ qwz_sysctl_moncap(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_r
 	return err;
 }
 
+
+/* debug.qwz.awdl0: "xx:xx:xx:xx:xx:xx" creates the kext's awdl0, "down" destroys it; reads its state. */
+static int
+qwz_sysctl_awdl0(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req)
+{
+	char buf[96];
+	int err;
+
+	if (req->newptr != USER_ADDR_NULL) {
+		size_t n = req->newlen < sizeof(buf) - 1 ? req->newlen : sizeof(buf) - 1;
+		err = SYSCTL_IN(req, buf, n);
+		if (err)
+			return err;
+		buf[n] = 0;
+		while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == 0))
+			buf[--n] = 0;
+		return qwz_awdl_set(buf);
+	}
+	qwz_awdl_status(buf, sizeof(buf));
+	return SYSCTL_OUT(req, buf, strlen(buf) + 1);
+}
+
+/* debug.qwz.awdltx: drains the frames the stack sent on awdl0. */
+static int
+qwz_sysctl_awdltx(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req)
+{
+	const size_t MAX = 512 * 1024;
+	size_t avail = qwz_awdl_tx_pending(), max, n;
+	void *buf;
+	int err;
+
+	if (req->newptr != USER_ADDR_NULL)
+		return EPERM;
+	if (req->oldptr == USER_ADDR_NULL) {
+		req->oldidx = avail;
+		return 0;
+	}
+	max = req->oldlen < MAX ? req->oldlen : MAX;
+	if (max == 0)
+		return 0;
+	buf = IOMalloc(max);
+	if (buf == NULL)
+		return ENOMEM;
+	n = qwz_awdl_tx_drain(buf, max);
+	err = n ? SYSCTL_OUT(req, buf, n) : 0;
+	IOFree(buf, max);
+	return err;
+}
+
+/* debug.qwz.awdlrx: frames from the air, injected as received on awdl0. */
+static int
+qwz_sysctl_awdlrx(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req)
+{
+	const size_t MAX = 512 * 1024;
+	void *buf;
+	int err;
+
+	if (req->newptr == USER_ADDR_NULL)
+		return 0;
+	if (req->newlen < 4 || req->newlen > MAX)
+		return EINVAL;
+	buf = IOMalloc(req->newlen);
+	if (buf == NULL)
+		return ENOMEM;
+	err = SYSCTL_IN(req, buf, req->newlen);
+	if (err == 0)
+		err = qwz_awdl_rx_inject(buf, req->newlen);
+	IOFree(buf, req->newlen);
+	return err;
+}
+
 SYSCTL_NODE(_debug, OID_AUTO, qwz, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "QwzMac");
 SYSCTL_PROC(_debug_qwz, OID_AUTO, mon, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     0, 0, qwz_sysctl_mon, "I", "monitor-mode capture: channel to start, 0 to stop (Wi-Fi must be off)");
@@ -183,7 +255,13 @@ SYSCTL_PROC(_debug_qwz, OID_AUTO, montxframe, CTLTYPE_OPAQUE | CTLFLAG_WR | CTLF
 SYSCTL_PROC(_debug_qwz, OID_AUTO, monpeer, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED,
     0, 0, qwz_sysctl_monpeer, "A", "firmware peer on the capture vdev: 'add xx:xx:xx:xx:xx:xx' or 'del'");
 SYSCTL_PROC(_debug_qwz, OID_AUTO, awdlif, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED,
-    0, 0, qwz_sysctl_awdlif, "A", "\"feth0\" marks the interface AWDL (IFEF_AWDL) for mDNSResponder/sharingd, \"-feth0\" clears");
+    0, 0, qwz_sysctl_awdlif, "A", "\"feth0\" or \"feth0=en3\" (delegate to the Wi-Fi interface too) marks it AWDL (IFEF_AWDL); \"-feth0\" clears");
+SYSCTL_PROC(_debug_qwz, OID_AUTO, awdl0, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, qwz_sysctl_awdl0, "A", "the kext's awdl0: write a MAC to create, \"down\" to destroy (qwz_awdl.h)");
+SYSCTL_PROC(_debug_qwz, OID_AUTO, awdltx, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED,
+    0, 0, qwz_sysctl_awdltx, "S", "drain the frames the stack sent on awdl0");
+SYSCTL_PROC(_debug_qwz, OID_AUTO, awdlrx, CTLTYPE_OPAQUE | CTLFLAG_WR | CTLFLAG_LOCKED,
+    0, 0, qwz_sysctl_awdlrx, "S", "inject frames received on awdl0");
 SYSCTL_PROC(_debug_qwz, OID_AUTO, montx, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     0, 0, qwz_sysctl_montx, "I", "monitor-mode transmit: 1 broadcast PSF copy once, 2 auto unicast reply, 4 unicast once");
 SYSCTL_STRING(_debug_qwz, OID_AUTO, monbssid, CTLFLAG_RW | CTLFLAG_LOCKED,
@@ -225,6 +303,9 @@ qwz_sysctl_register(qwz_sysctl_start_fn start, void *arg)
 	sysctl_register_oid(&sysctl__debug_qwz_montxframe);
 	sysctl_register_oid(&sysctl__debug_qwz_monpeer);
 	sysctl_register_oid(&sysctl__debug_qwz_awdlif);
+	sysctl_register_oid(&sysctl__debug_qwz_awdl0);
+	sysctl_register_oid(&sysctl__debug_qwz_awdltx);
+	sysctl_register_oid(&sysctl__debug_qwz_awdlrx);
 	sysctl_register_oid(&sysctl__debug_qwz_moncap);
 #ifdef QWZ_DEBUG
 	sysctl_register_oid(&sysctl__debug_qwz_debug);
@@ -245,6 +326,9 @@ qwz_sysctl_unregister(void)
 	sysctl_unregister_oid(&sysctl__debug_qwz_moncap);
 	sysctl_unregister_oid(&sysctl__debug_qwz_monpeer);
 	sysctl_unregister_oid(&sysctl__debug_qwz_awdlif);
+	sysctl_unregister_oid(&sysctl__debug_qwz_awdl0);
+	sysctl_unregister_oid(&sysctl__debug_qwz_awdltx);
+	sysctl_unregister_oid(&sysctl__debug_qwz_awdlrx);
 	sysctl_unregister_oid(&sysctl__debug_qwz_montxframe);
 	sysctl_unregister_oid(&sysctl__debug_qwz_monmac);
 	sysctl_unregister_oid(&sysctl__debug_qwz_montx);
