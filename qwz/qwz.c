@@ -325,6 +325,20 @@ qwz_init(struct ifnet *ifp)
 	/* Wi-Fi coming back ends a monitor-mode capture (qwz_mon.c). */
 	if (sc->mon_active)
 		qwz_mon_stop(sc);
+#ifdef __APPLE__
+	/*
+	 * After a capture cell the firmware no longer delivers the station's
+	 * replies (qwz_mon.c): restart it, and take the full bring-up below.
+	 */
+	if (sc->mon_fw_dirty) {
+		sc->mon_fw_dirty = 0;
+		if (sc->fw_initialized) {
+			printf("%s: restarting the firmware after the capture cell\n",
+			    sc->sc_dev.dv_xname);
+			qwz_core_deinit(sc);
+		}
+	}
+#endif
 
 #ifdef __APPLE__
 	/*
@@ -356,6 +370,15 @@ qwz_init(struct ifnet *ifp)
 	if (sc->fw_initialized) {
 		if (!TAILQ_EMPTY(&sc->peers) || sc->num_started_vdevs > 0) {
 			error = qwz_deauth(sc);
+#ifdef __APPLE__
+			if (error == EAGAIN || error == ETIMEDOUT) {
+				/* The firmware stopped answering: restart it. */
+				printf("%s: deauth failed (%d): restarting the firmware\n",
+				    sc->sc_dev.dv_xname, error);
+				qwz_core_deinit(sc);
+				goto full_init;
+			}
+#endif
 			if (error) {
 				splx(s);
 				return error;
@@ -1195,6 +1218,8 @@ qwz_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 	sc->ns_nstate = nstate;
 	sc->ns_arg = arg;
 
+	qwz_log("qwz: join: newstate %d -> %d (arg %d), scan state %d, vdev0 started %d up %d\n",
+	    ic->ic_state, nstate, arg, sc->scan.state, sc->sc_vif.is_started, sc->sc_vif.is_up);
 	qwz_add_task(sc, sc->sc_nswq, &sc->newstate_task);
 
 	return 0;
@@ -11699,6 +11724,7 @@ qwz_wmi_event_scan_completed(struct qwz_softc *sc)
 		break;
 	case ATH12K_SCAN_RUNNING:
 	case ATH12K_SCAN_ABORTING:
+		qwz_log("qwz: join: scan completed (state %d)\n", sc->scan.state);
 		qwz_mac_scan_finish(sc);
 		break;
 	}
@@ -12107,6 +12133,16 @@ qwz_mgmt_rx_event(struct qwz_softc *sc, struct mbuf *m)
 	}
 
 	wh = mtod(m, struct ieee80211_frame *);
+	{
+		uint8_t st = wh->i_fc[0] & IEEE80211_FC0_SUBTYPE_MASK;
+
+		if (st != IEEE80211_FC0_SUBTYPE_BEACON &&
+		    st != IEEE80211_FC0_SUBTYPE_PROBE_RESP &&
+		    st != IEEE80211_FC0_SUBTYPE_PROBE_REQ &&
+		    st != IEEE80211_FC0_SUBTYPE_ACTION)
+			qwz_log("qwz: join: mgmt rx subtype 0x%02x from %s, ic state %d\n",
+			    st, ether_sprintf(wh->i_addr2), ic->ic_state);
+	}
 	ni = ieee80211_find_rxnode(ic, wh);
 #if 0
 	/* In case of PMF, FW delivers decrypted frames with Protected Bit set.
@@ -12242,6 +12278,9 @@ qwz_wmi_process_mgmt_tx_comp(struct qwz_softc *sc,
 
 	if (tx_compl_param->status != 0)
 		ifp->if_oerrors++;
+	if (ic->ic_state == IEEE80211_S_AUTH || ic->ic_state == IEEE80211_S_ASSOC)
+		qwz_log("qwz: join: mgmt tx compl desc %u status %u (ic state %d)\n",
+		    tx_compl_param->desc_id, tx_compl_param->status, ic->ic_state);
 
 	if (arvif->txmgmt.queued < nitems(arvif->txmgmt.data) - 1) {
 		sc->qfullmsk &= ~(1U << QWZ_MGMT_QUEUE_ID);
@@ -24542,6 +24581,15 @@ qwz_mac_mgmt_tx_wmi(struct qwz_softc *sc, struct qwz_vif *arvif,
 	}
 #endif
 	ret = qwz_wmi_mgmt_send(sc, arvif, pdev_id, buf_id, m, tx_data);
+	{
+		struct ieee80211_frame *wh = mtod(m, struct ieee80211_frame *);
+		uint8_t st = wh->i_fc[0] & IEEE80211_FC0_SUBTYPE_MASK;
+
+		if (arvif == &sc->sc_vif && st != IEEE80211_FC0_SUBTYPE_PROBE_REQ &&
+		    st != IEEE80211_FC0_SUBTYPE_ACTION)
+			qwz_log("qwz: join: mgmt tx subtype 0x%02x to %s on vdev %u, slot %d -> %d\n",
+			    st, ether_sprintf(wh->i_addr1), arvif->vdev_id, buf_id, ret);
+	}
 	if (ret) {
 		printf("%s: failed to send mgmt frame: %d\n",
 		    sc->sc_dev.dv_xname, ret);
@@ -24965,6 +25013,8 @@ qwz_scan(struct qwz_softc *sc)
 	scan_timeout += ATH12K_MAC_SCAN_CMD_EVT_OVERHEAD;
 
 	ret = qwz_start_scan(sc, arg);
+	qwz_log("qwz: join: hw scan start -> %d (%u channels, vdev %u, ic state %d)\n",
+	    ret, arg->num_chan, arg->vdev_id, ic->ic_state);
 	if (ret) {
 		if (ret != ESHUTDOWN) {
 			printf("%s: failed to start hw scan: %d\n",

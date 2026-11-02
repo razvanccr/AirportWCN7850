@@ -2146,6 +2146,7 @@ struct qwz_softc {
 	/* qwz_mon.c: monitor-mode capture (debug.qwz.mon). */
 	struct qwz_vif			 sc_monvif;
 	int				 mon_active;
+	int				 mon_fw_dirty;	/* a cell ran: restart the firmware before the station */
 	int				 mon_chan;
 	uint32_t			 mon_freq;
 	int				 mon_bssid_set;

@@ -823,3 +823,52 @@ and a legacy ifnet without a Skywalk nexus is not. Native receiving on
 iOS 26 therefore ends at the transfer stage until awdl0 is a
 Skywalk-native interface (or the nexus-attached legacy path is made to
 carry frames intact). Everything before that stage works natively.
+
+### Wi-Fi after the cell: the firmware hangs (2026-11-02, 13:10)
+
+After the long M4 session the station never came back: Wi-Fi on, every
+scan empty, no network listed. The kext log says why: at the cell's stop
+every firmware command timed out ("mon: vdev 1 down failed: 35", "stop
+failed: 35", "delete failed: 35"), and every `qwz_init` since fails with
+35 too. The firmware is wedged (the session had "utx ... fail 126, data
+ok 187 bad 27" transmit completions, i.e. something in the heavy transfer
+exchange upset it), and the driver's init does not restart the firmware
+on a WMI timeout, so only a reboot recovers. Last night's "Artist5 asks
+for a password" was the same thing in a milder form. To fix in the kext:
+a firmware restart (the full bring-up) when WMI stops answering, both in
+`qwz_mon_stop` and in `qwz_init`.
+
+Fix (build da19de82): `qwz_mon_vdev_teardown` reports WMI timeouts, and
+`qwz_mon_stop` then runs `qwz_core_deinit` so the next `qwz_init` takes the
+full bring-up instead of failing on a wedged firmware; `qwz_init` itself
+does the same when its deauth times out. The station should come back
+after any cell session without a reboot. The "hold" mode's empty scans
+still keep the Wi-Fi menu spinning; cosmetic, open.
+
+### Wi-Fi after the cell, continued: every cell, not only a wedged one (2026-11-02, evening)
+
+da19de82 was not enough: after any cell, wedged or not, the station scanned
+fine but no join completed. The join diagnostics (`qwz: join: ...` lines,
+build bf274a60) showed the first frame of every join going out and being
+confirmed by the firmware, and no reply ever reaching the driver, while
+the same exchange works at boot. The firmware left behind by a cell no
+longer serves the station, whatever the vdev teardown reports.
+
+Two reboots were wasted on a fix that never ran: dbe680c2 put the
+restart under the `fail:` label of `qwz_mon_start`, the path for a cell
+that fails to come up, not the stop path. Lesson: read the kext's own log
+ring (`scripts/qwz-log.sh`, the messages reach neither the unified log
+nor dmesg) before declaring a build tested.
+
+Fix (build 4fb683bb): `qwz_mon_stop` sets `sc->mon_fw_dirty`, and
+`qwz_init` restarts the firmware (`qwz_core_deinit`, then the full
+boot-time bring-up) when it finds the flag. Not at the stop itself: a
+second cell may follow without Wi-Fi in between, and `qwz_mon_start`
+needs the firmware running. A wedged firmware (WMI timeouts at teardown)
+still restarts on the spot. Verified: cell on channel 6 with awdl0, Ctrl-C,
+Wi-Fi on; the log shows "restarting the firmware after the capture cell",
+stages 9 to 19, then the full join exchange, and Artist5 is joined about
+nine seconds after Wi-Fi comes on (the router answers over en3, a page
+fetch bound to en3 succeeds). `networksetup -getairportnetwork` still
+says "not associated" even when joined, as it did before any cell: a
+separate, cosmetic gap in the SSID report.

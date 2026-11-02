@@ -15,6 +15,8 @@
 #include <net80211/ieee80211_ioctl.h>
 #include <net80211/ieee80211_priv.h>
 #include <crypto/sha1.h>
+#include "../../qwz/qwz_log.h"
+#define QWZLOG(fmt, ...)	qwz_log("qwz: " fmt "\n", ##__VA_ARGS__)
 extern "C" int qwz_mon_holding(struct ieee80211com *);	// qwz/qwz_mon.h (M3 hold)
 
 extern IOCommandGate *_fCommandGate;
@@ -387,15 +389,17 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLJoin(apple80211AssocCandidates *r
     if (!AirportWCL::decodeJoin(request, 0x2cc, join)) {
         return kIOReturnBadArgument;
     }
-    if (qwz_mon_holding(fHalService->get80211Controller()))
+    if (qwz_mon_holding(fHalService->get80211Controller())) {
+        QWZLOG("WCL join refused: the capture cell holds the radio");
         return kIOReturnNotReady; // M3 hold: no station to join with
+    }
     return startWCLJoin(join);
 }
 
 IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &join)
 {
     auto auth = AirportWCL::classifyLegacyAuth(join);
-    XYLog("WCL join ssid_len=%u bssid=%s chanspec=0x%x auth lower=%u upper=0x%x -> %s, key len=%u type=%u%s, rsn_ie len=%u\n",
+    QWZLOG("WCL join ssid_len=%u bssid=%s chanspec=0x%x auth lower=%u upper=0x%x -> %s, key len=%u type=%u%s, rsn_ie len=%u",
           join.ssidLength, ether_sprintf(join.bssid), join.channelSpec, join.lowerAuth, join.upperAuth,
           AirportWCL::legacyAuthName(auth), join.keyLength, join.keyCipher,
           AirportWCL::isPassphrase(join) ? " (passphrase)" : "", join.rsnLength);
@@ -416,6 +420,8 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
         return kIOReturnSuccess;
     }
     if (!supported || !(ic->ic_if.if_flags & IFF_RUNNING) || joinPending || scanPending) {
+        QWZLOG("WCL join refused: supported=%d running=%d joinPending=%d scanPending=%d state=%d",
+              supported, (ic->ic_if.if_flags & IFF_RUNNING) != 0, joinPending, scanPending, ic->ic_state);
         explicit_bzero(&join, sizeof(join));
         return !supported ? kIOReturnUnsupported : kIOReturnBusy;
     }

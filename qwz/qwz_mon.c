@@ -958,11 +958,15 @@ qwz_mon_vdev_create(struct qwz_softc *sc)
 	vif->vdev_type = (qwz_mon_flags & QWZ_MON_F_AP) ? WMI_VDEV_TYPE_AP : WMI_VDEV_TYPE_MONITOR;
 	vif->vdev_subtype = WMI_VDEV_SUBTYPE_NONE;
 	vif->bank_id = -1;
-	/* The card's own address, not the interface's: macOS gives the station
-	 * a private (random) address when Wi-Fi comes on, and an AWDL address
-	 * that changes between runs leaves phones with stale records
-	 * (Mac-Pro.local resolving to the previous link-local). */
+	/* Derived from the card's own address, not the interface's: macOS
+	 * gives the station a private (random) address when Wi-Fi comes on,
+	 * and an AWDL address that changes between runs leaves phones with
+	 * stale records. Locally administered (bit 1 of the first byte) so it
+	 * differs from the station vdev's: two vdevs with one address left the
+	 * station unable to associate after a cell session. iPhones use a
+	 * local address for AWDL too. */
 	IEEE80211_ADDR_COPY(vif->vdev_addr, sc->mac_addr);
+	vif->vdev_addr[0] |= 0x02;
 	if ((qwz_mon_flags & QWZ_MON_F_BSSID_MAC) && sc->mon_bssid_set)
 		IEEE80211_ADDR_COPY(vif->vdev_addr, sc->mon_bssid);
 
@@ -1170,12 +1174,13 @@ qwz_mon_vdev_start(struct qwz_softc *sc, int chan, uint32_t freq)
 	return 0;
 }
 
-static void
+/* Returns 1 when the firmware stopped answering (WMI timeouts). */
+static int
 qwz_mon_vdev_teardown(struct qwz_softc *sc)
 {
 	struct qwz_pdev *pdev = &sc->pdevs[0];
 	struct qwz_vif *vif = &sc->sc_monvif;
-	int ret;
+	int ret, wedged = 0;
 
 	qwz_mon_txq_purge(sc);
 	qwz_mon_sender_peer(sc, NULL, 0);
@@ -1184,6 +1189,8 @@ qwz_mon_vdev_teardown(struct qwz_softc *sc)
 		ret = qwz_wmi_vdev_down(sc, vif->vdev_id, pdev->pdev_id);
 		if (ret)
 			printf("qwz: mon: vdev %d down failed: %d\n", vif->vdev_id, ret);
+		if (ret == EAGAIN || ret == ETIMEDOUT)
+			wedged = 1;
 		vif->is_up = 0;
 	}
 	if (vif->is_started) {
@@ -1193,6 +1200,8 @@ qwz_mon_vdev_teardown(struct qwz_softc *sc)
 			ret = qwz_mac_vdev_setup_sync(sc);
 		if (ret)
 			printf("qwz: mon: vdev %d stop failed: %d\n", vif->vdev_id, ret);
+		if (ret == EAGAIN || ret == ETIMEDOUT)
+			wedged = 1;
 		vif->is_started = 0;
 		if (sc->num_started_vdevs > 0)
 			sc->num_started_vdevs--;
@@ -1212,7 +1221,10 @@ qwz_mon_vdev_teardown(struct qwz_softc *sc)
 			printf("qwz: mon: vdev %d delete failed: %d\n", vif->vdev_id, ret);
 		else
 			printf("qwz: mon: vdev %d deleted\n", vif->vdev_id);
+		if (ret == EAGAIN || ret == ETIMEDOUT)
+			wedged = 1;
 	}
+	return wedged;
 }
 
 /* Under the gate; the caller holds ioctl_rwl where it matters. */
@@ -1284,7 +1296,11 @@ qwz_mon_start(struct qwz_softc *sc, int chan)
 	return 0;
 
 fail:
-	qwz_mon_vdev_teardown(sc);
+	sc->mon_fw_dirty = 1;
+	if (qwz_mon_vdev_teardown(sc)) {
+		printf("qwz: mon: start failed and the firmware stopped answering: restarting it\n");
+		qwz_core_deinit(sc);
+	}
 	return ret;
 }
 
@@ -1295,6 +1311,15 @@ qwz_mon_stop(struct qwz_softc *sc)
 		return;
 	sc->mon_active = 0;
 	timeout_del(&sc->mon_reap_timer);
+	/*
+	 * Every cell leaves the firmware unable to serve the station: its own
+	 * frames went out but no replies reached the host any more, so no
+	 * network could be joined until a reboot. Mark it, and qwz_init
+	 * restarts the firmware (the full bring-up, which is what works at
+	 * boot) before the station comes up. Not here: another cell may
+	 * follow without Wi-Fi in between, and it needs the firmware running.
+	 */
+	sc->mon_fw_dirty = 1;
 	if (qwz_mon_flags & QWZ_MON_F_PROMISC)
 		qwz_mon_wmi_promisc(sc, 0);
 	if ((qwz_mon_flags & QWZ_MON_F_MNTFILTER) && sc->sc_monvif.is_up)
@@ -1303,7 +1328,12 @@ qwz_mon_stop(struct qwz_softc *sc)
 	    sc->sc_monvif.is_up)
 		qwz_mon_wmi_nrp(sc, sc->sc_monvif.vdev_id, sc->mon_bssid, 0,
 		    !!(qwz_mon_flags & QWZ_MON_F_NRP_STA));
-	qwz_mon_vdev_teardown(sc);
+	if (qwz_mon_vdev_teardown(sc)) {
+		printf("qwz: mon: the firmware stopped answering: restarting it now\n");
+		qwz_mon_reap_ring(sc);
+		qwz_core_deinit(sc);
+		return;
+	}
 	qwz_mon_reap_ring(sc);	/* return the buffers still in the ring */
 	if (!(qwz_mon_flags & QWZ_MON_F_KEEP_FILTER)) {
 		if (qwz_mon_rx_filter(sc, 0))
