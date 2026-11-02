@@ -54,6 +54,8 @@ IOCommandGate *qwz_compat_gate(void);
 /* ---- M1 transmit state ----------------------------------------------- */
 
 static void qwz_mon_sender_peer(struct qwz_softc *, const uint8_t *, int);
+static int qwz_mon_parse_mac(const char *, uint8_t *);
+static struct qwz_softc *qwz_mon_sc;	/* the one softc; set by qwz_mon_attach() */
 
 uint32_t qwz_mon_tx_mode;		/* bit 2: auto unicast reply */
 static uint8_t mon_psf[512];		/* last PSF heard, without FCS */
@@ -153,6 +155,13 @@ qwz_mon_tx_compl(struct qwz_softc *sc, struct wmi_mgmt_tx_compl_event *ev)
 	td->ni = NULL;
 	if (q->queued > 0)
 		q->queued--;
+	switch (sc->mon_tx_kind[ev->desc_id]) {
+	case 1: if (ev->status == 0) sc->mon_stats.ufr_mgmt_ok++; else sc->mon_stats.ufr_mgmt_bad++; break;
+	case 2: if (ev->status == 0) sc->mon_stats.ufr_data_ok++; else sc->mon_stats.ufr_data_bad++; break;
+	case 3: if (ev->status == 0) sc->mon_stats.ufr_ctrl_ok++; else sc->mon_stats.ufr_ctrl_bad++; break;
+	default: break;
+	}
+	sc->mon_tx_kind[ev->desc_id] = 0;
 	/* WMI_MGMT_TX_COMP_TYPE_*: 0 complete ok, 1 discard, 2 inspect, 3 complete no ack. */
 	if (ev->status == 0) {
 		sc->mon_stats.tx_ok++;
@@ -169,6 +178,127 @@ qwz_mon_tx_compl(struct qwz_softc *sc, struct wmi_mgmt_tx_compl_event *ev)
 		printf("qwz: mon: tx compl desc %u status %u ack_rssi %d\n", ev->desc_id,
 		    ev->status, (int32_t)ev->ack_rssi);
 	return 1;
+}
+
+/* Transmit `frame` (no FCS) on the capture vdev; the slot remembers the frame type. */
+static int
+qwz_mon_tx_bytes(struct qwz_softc *sc, const uint8_t *frame, size_t len, uint8_t kind)
+{
+	struct qwz_vif *vif = &sc->sc_monvif;
+	struct mbuf *m;
+	int slot, ret;
+
+	if (!sc->mon_active || !vif->is_up || !mon_txmaps_ready)
+		return ENXIO;
+	if (len < 10 || len > QWZ_MONTX_MAXFRAME)
+		return EINVAL;
+	if (vif->txmgmt.queued >= (int)nitems(vif->txmgmt.data) - 1)
+		return ENOSPC;
+	m = m_gethdr(M_DONTWAIT, MT_DATA);
+	if (m == NULL)
+		return ENOBUFS;
+	if (len <= MCLBYTES)
+		MCLGET(m, M_DONTWAIT);
+	else
+		MCLGETL(m, M_DONTWAIT, len);
+	if ((M_FLAGS(m) & M_EXT) == 0) {
+		m_freem(m);
+		return ENOBUFS;
+	}
+	M_SETLEN(m, len);
+	memcpy(mtod(m, uint8_t *), frame, len);
+	slot = vif->txmgmt.cur;
+	ret = qwz_mac_mgmt_tx_wmi(sc, vif, sc->pdevs[0].pdev_id, NULL, m);
+	if (ret) {
+		if (ret != ENOBUFS)
+			m_freem(m);
+		return ret;
+	}
+	sc->mon_tx_kind[slot] = kind;
+	return 0;
+}
+
+static IOReturn
+qwz_mon_txframe_gated(OSObject *, void *arg0, void *arg1, void *arg2, void *)
+{
+	struct qwz_softc *sc = qwz_mon_sc;
+	const uint8_t *buf = (const uint8_t *)arg0;
+	size_t len = (size_t)(uintptr_t)arg1;
+	int *errp = (int *)arg2;
+	const struct qwz_montx_hdr *h = (const struct qwz_montx_hdr *)buf;
+	const uint8_t *frame = buf + sizeof(*h);
+	size_t flen = len - sizeof(*h);
+	uint8_t type, kind;
+	int ret;
+
+	if (sc == NULL) {
+		*errp = ENXIO;
+		return kIOReturnSuccess;
+	}
+	type = (frame[0] >> 2) & 3;
+	kind = type == 0 ? 1 : type == 2 ? 2 : 3;
+	ret = qwz_mon_tx_bytes(sc, frame, flen, kind);
+	if (ret == 0)
+		sc->mon_stats.ufr_sent++;
+	else if (ret == ENOSPC)
+		sc->mon_stats.ufr_full++;
+	else
+		sc->mon_stats.ufr_fail++;
+	(void)h;	/* flags and rate are recorded by the caller for now */
+	*errp = ret;
+	return kIOReturnSuccess;
+}
+
+int
+qwz_mon_tx_frame(const void *buf, size_t len)
+{
+	IOCommandGate *gate = qwz_compat_gate();
+	int err = ENXIO;
+
+	if (gate == NULL || qwz_mon_sc == NULL)
+		return ENXIO;
+	if (len < sizeof(struct qwz_montx_hdr) + 10 ||
+	    len > sizeof(struct qwz_montx_hdr) + QWZ_MONTX_MAXFRAME)
+		return EINVAL;
+	gate->runAction(qwz_mon_txframe_gated, (void *)buf, (void *)(uintptr_t)len, &err);
+	return err;
+}
+
+static IOReturn
+qwz_mon_peer_gated(OSObject *, void *arg0, void *arg1, void *, void *)
+{
+	struct qwz_softc *sc = qwz_mon_sc;
+	const char *cmd = (const char *)arg0;
+	int *errp = (int *)arg1;
+	uint8_t mac[6];
+
+	if (sc == NULL || !sc->mon_active) {
+		*errp = ENXIO;
+		return kIOReturnSuccess;
+	}
+	if (strncmp(cmd, "add ", 4) == 0 && qwz_mon_parse_mac(cmd + 4, mac)) {
+		if (sc->mon_sender_peer && memcmp(sc->mon_sender_addr, mac, 6) != 0)
+			qwz_mon_sender_peer(sc, NULL, 0);	/* one peer at a time for now */
+		qwz_mon_sender_peer(sc, mac, 1);
+		*errp = sc->mon_sender_peer ? 0 : EIO;
+	} else if (strncmp(cmd, "del", 3) == 0) {
+		qwz_mon_sender_peer(sc, NULL, 0);
+		*errp = 0;
+	} else
+		*errp = EINVAL;
+	return kIOReturnSuccess;
+}
+
+int
+qwz_mon_peer(const char *cmd)
+{
+	IOCommandGate *gate = qwz_compat_gate();
+	int err = ENXIO;
+
+	if (gate == NULL || qwz_mon_sc == NULL)
+		return ENXIO;
+	gate->runAction(qwz_mon_peer_gated, (void *)cmd, &err);
+	return err;
 }
 
 static void
@@ -318,8 +448,6 @@ qwz_mon_parse_mac(const char *s, uint8_t *out)
 	return 1;
 }
 
-/* The one softc; set by qwz_mon_attach(). */
-static struct qwz_softc *qwz_mon_sc;
 
 /* ---- capture ring ----------------------------------------------------- */
 
@@ -361,15 +489,17 @@ moncap_put(const uint8_t *frame, size_t len, uint16_t flags, uint8_t decap,
 		}
 		moncap_head = 0;
 	}
+	uint64_t us = getnsecuptime() / 1000ULL;
+
 	hdr.len = (uint32_t)len;
-	hdr.ts_ms = (uint32_t)(getnsecuptime() / 1000000ULL);
+	hdr.ts_lo = (uint32_t)us;
 	hdr.flags = flags;
 	hdr.decap = decap;
 	hdr.chan = chan;
 	hdr.seq = moncap_seq++;
 	hdr.rssi = rssi;
 	hdr.rate = rate;
-	hdr.pad = 0;
+	hdr.ts_hi = (uint16_t)(us >> 32);
 	memcpy(moncap_ring + moncap_head, &hdr, sizeof(hdr));
 	memcpy(moncap_ring + moncap_head + sizeof(hdr), frame, len);
 	moncap_head = (moncap_head + rec) % QWZ_MONCAP_SIZE;
@@ -716,6 +846,12 @@ qwz_mon_reap(void *arg)
 		    sc->mon_stats.reo_err, sc->mon_stats.wbm_err, sc->mon_stats.bufs,
 		    sc->mon_stats.badcookie, sc->mon_stats.nolink, sc->mon_stats.duplink,
 		    sc->mon_stats.linkret_fail, moncap_dropped);
+		if (sc->mon_stats.ufr_sent || sc->mon_stats.ufr_full || sc->mon_stats.ufr_fail)
+			printf("qwz: mon: utx: sent %u full %u fail %u; mgmt ok %u bad %u, data ok %u bad %u, ctrl ok %u bad %u\n",
+			    sc->mon_stats.ufr_sent, sc->mon_stats.ufr_full, sc->mon_stats.ufr_fail,
+			    sc->mon_stats.ufr_mgmt_ok, sc->mon_stats.ufr_mgmt_bad,
+			    sc->mon_stats.ufr_data_ok, sc->mon_stats.ufr_data_bad,
+			    sc->mon_stats.ufr_ctrl_ok, sc->mon_stats.ufr_ctrl_bad);
 		if (sc->mon_stats.rx_psf || sc->mon_stats.tx_sent)
 			printf("qwz: mon: tx: psf heard %u, sent %u fail %u, compl ok %u discard %u inspect %u noack %u other %u, last ack rssi %d, mode 0x%x\n",
 			    sc->mon_stats.rx_psf, sc->mon_stats.tx_sent, sc->mon_stats.tx_fail,
@@ -1248,6 +1384,20 @@ qwz_mon_tx(int ops)
 		return ENXIO;
 	gate->runAction(qwz_mon_tx_gated, (void *)(intptr_t)ops, &err);
 	return err;
+}
+
+void
+qwz_mon_mac_str(char *out, size_t len)
+{
+	struct qwz_softc *sc = qwz_mon_sc;
+	const uint8_t *m;
+
+	if (sc == NULL) {
+		snprintf(out, len, "00:00:00:00:00:00");
+		return;
+	}
+	m = sc->mon_active ? sc->sc_monvif.vdev_addr : sc->mac_addr;
+	snprintf(out, len, "%02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2], m[3], m[4], m[5]);
 }
 
 int

@@ -2153,11 +2153,15 @@ struct qwz_softc {
 	int				 mon_self_peer;	/* AP vdev's own peer entry exists */
 	int				 mon_sender_peer;	/* raw firmware peer for mon_sender_addr */
 	uint8_t				 mon_sender_addr[IEEE80211_ADDR_LEN];
+	uint8_t				 mon_tx_kind[8];	/* per transmit slot: 0 replay, 1 user mgmt, 2 user data, 3 user ctrl */
 	struct {
 		uint32_t entries, mpdus, frames, bufs, mgmt;
 		uint32_t reo, reo_err, wbm_err;
 		uint32_t rx_psf, tx_sent, tx_fail, tx_ok, tx_discard, tx_inspect, tx_noack, tx_other;
 		int32_t last_ack_rssi;
+		/* Frames handed in from userspace (M2), by 802.11 type. */
+		uint32_t ufr_sent, ufr_full, ufr_fail;
+		uint32_t ufr_mgmt_ok, ufr_mgmt_bad, ufr_data_ok, ufr_data_bad, ufr_ctrl_ok, ufr_ctrl_bad;
 		uint32_t badcookie, nolink, duplink, linkret_fail;
 		uint64_t last_log;
 	} mon_stats;

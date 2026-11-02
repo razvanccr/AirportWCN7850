@@ -451,3 +451,99 @@ on the beacon flag.
 M1's stop condition is passed. M2: the owly exclusive-mode port (a user
 client for inject/capture, `owly-awdl` + `owly-airdrop` on a `feth` pair),
 with the AP vdev plus self peer as the cell.
+
+## M2 complete: `owly receive` on this Hackintosh (2026-11-02)
+
+An iPhone ("RazvanC iPhone", iOS share sheet, AirDrop set to Everyone) found
+this machine as "Mac-Pro", and a 193 KB JPEG arrived intact through owly's
+receiver, over AWDL on the WCN7850, with the station interface down. The
+whole path from M0 to a file on disk:
+
+```
+iPhone  ──AWDL on channel 6──▶  WCN7850 firmware (AP-type vdev, BSSID 00:25:00:ff:94:73,
+                                 self peer, flags 0x503)
+        ──RXDMA error ring / WMI──▶  qwz_mon (kext)  ──debug.qwz.moncap──▶  owlymac (root)
+        ◀──WMI_MGMT_TX_SEND────────  qwz_mon          ◀──debug.qwz.montxframe──
+                                      owlymac: owly_awdl::Node (exclusive mode, Presence::Fixed)
+                                      ──BPF write feth1──▶ feth0 (MAC = card MAC, EUI-64 link-local, MTU 1450)
+                                                            ──IPv6──▶ owly receive -i feth0 (mDNS 5353, HTTPS 8772)
+```
+
+### What was built
+
+- Kext (`qwz_mon.c`, uncommitted on `awdl-m0-m1`): microsecond capture
+  timestamps (`ts_lo`/`ts_hi`), `debug.qwz.montxframe` (an opaque write: a
+  4-byte `qwz_montx_hdr` then the frame without FCS, transmitted through
+  `WMI_MGMT_TX_SEND_CMDID` on the capture vdev; ENOSPC when the eight-slot
+  queue is full), `debug.qwz.monpeer` (a firmware peer, unused so far),
+  `debug.qwz.monmac` (the capture vdev's MAC: the AWDL address).
+- owly port (`/Users/catalinr/Documents/Github/owly-macos/owly`, on 0.4.2):
+  the Linux-only modules of `owly-radio` gated behind `cfg(target_os =
+  "linux")`, and a new crate `owly-radio-macos`:
+  - `kext.rs`: `Radio::up/down` (writes `monbssid`, `monflags`, `mon`; reads
+    `monmac`), `KextAir` (a thread drains `moncap` every 2 ms into a channel,
+    strips the FCS when flagged, tallies frames by kind for the log; `send`
+    writes `montxframe`, a full queue is `Err(frame)` so the node retries).
+  - `feth.rs`: `Pair::create` makes `feth0`/`feth1`, sets `feth0`'s MAC to
+    the AWDL address and its link-local to the EUI-64 one (the kernel's
+    other link-locals removed), MTU 1450; `Wire` reads `feth1` through BPF
+    from a blocking thread (one-second read timeout; macOS's BPF and kqueue
+    don't mix, tokio's `AsyncFd` on it fails with EINVAL) and writes to it;
+    `peer_up`/`peer_down` are `ndp -s`/`ndp -d`, as rtnetlink neighbours on
+    Linux.
+  - `bin/owlymac.rs`: `sudo owlymac up [--channel 6] [--bssid awdl|own|MAC]
+    [--flags 0x503] [--rate 12] [--name]`; a lock in `/var/run/owlymac.lock`
+    (two daemons once drained the ring in turns and tore each other down);
+    Ctrl-C stops the node, destroys the pair and stops the cell.
+
+### What the run showed
+
+- The firmware transmits data-type frames through the management-transmit
+  command: every `montxframe` completed with status 0, 17 data frames among
+  the first 2 500. No raw TCL path needed.
+- The own-MAC beaconing cell (`monbssid` empty, flags 0x4503, the M1
+  configuration left as an open question) does **not** receive AWDL frames:
+  11 minutes on channel 6 with the share sheet open gave 2 232 beacons, 137
+  probe requests and zero action frames. With the AWDL BSSID and flags 0x503
+  the iPhone was a peer 10 s after start. The AP vdev's BSSID is what the
+  firmware's filter-pass class keys on; beaconing is irrelevant.
+- Channel 44 (20 MHz) heard only sub-24-byte frames, no beacons, no AWDL;
+  the iPhone did its AWDL on channel 6 here. Not investigated further.
+- Election, sync and IPv6 work: `ping6` to the iPhone's link-local address
+  over `feth0` answers (RTT 280-820 ms, which is AWDL's availability windows
+  plus our 2 ms poll and the WMI round trip; tuning is for later).
+- During the 193 KB transfer the eight-slot transmit queue overflowed: `radio
+  full 769, gave up 15` in owly's stats. The file still arrived (TCP
+  retransmits), but the queue should grow to 32 or 64 and the node's rate
+  (`--rate 12`, legacy 12 Mbit/s for data) is low.
+- `rssi` is `None` for the peer: the ring path carries no RSSI yet (only the
+  WMI management path does). The monitor status ring would fix that.
+
+### The macOS trap: Local Network privacy
+
+For an hour the receiver answered no mDNS query although the queries reached
+`feth0` (a Python listener saw them). Every Rust binary started from the
+Claude session, including its terminal tabs, received no multicast at all,
+while Apple's own `python3` and `ping6` did: macOS 15+ applies the **Local
+Network** privacy permission (System Settings > Privacy & Security > Local
+Network) to third-party processes by their responsible app, and silently
+drops local multicast and link-local traffic when it is not granted; platform
+binaries are exempt. Started from Terminal.app, the same `owly receive`
+answered at once. `owlymac` runs as root and talks to the kext and BPF, so
+it is unaffected. Grant the permission to the app that launches `owly`, or
+launch it from Terminal.app.
+
+### How to run
+
+```
+# Wi-Fi off first.
+sudo RUST_LOG=info owlymac up --channel 6
+# in Terminal.app (Local Network permission):
+owly receive -i feth0 --name Mac-Pro --accept --dir ~/Downloads
+```
+
+M2's stop condition is passed. Next: commit, then M3 (sending: `owly send`
+needs a BLE advertisement to wake Apple receivers, owly's `btleplug` path
+should work with the BluetoothWCN7850 kext), queue depth and rate control,
+RSSI from the status ring, the receiver on the daemon's own ports so one
+command does it all.

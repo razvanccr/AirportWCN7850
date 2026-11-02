@@ -33,15 +33,29 @@ struct qwz_softc;
  * followed by len bytes of frame and padding to a multiple of 4. */
 struct qwz_moncap_hdr {
 	uint32_t len;		/* frame bytes that follow */
-	uint32_t ts_ms;		/* uptime at delivery, milliseconds */
+	uint32_t ts_lo;		/* uptime at delivery, microseconds, low 32 bits */
 	uint16_t flags;		/* QWZ_MONCAP_F_* */
 	uint8_t decap;		/* DP_RX_DECAP_TYPE_* of the first MSDU */
 	uint8_t chan;		/* channel the radio was parked on */
 	uint32_t seq;		/* running count of captured frames */
 	int8_t rssi;		/* dBm when known (WMI management path), else 0 */
 	uint8_t rate;		/* 500 kbit/s units when known, else 0 */
-	uint16_t pad;
+	uint16_t ts_hi;		/* microseconds, bits 32-47 */
 };
+
+/*
+ * M2: frames from userspace (debug.qwz.montxframe, opaque write): this
+ * header, then the 802.11 frame without FCS. Sent through the firmware's
+ * management-transmit command on the capture vdev (AP type with its self
+ * peer). ENOSPC when the eight-slot queue is full: try again later.
+ */
+struct qwz_montx_hdr {
+	uint16_t flags;		/* QWZ_MONTX_F_* */
+	uint8_t rate;		/* 500 kbit/s units; 0 lets the firmware choose (recorded only for now) */
+	uint8_t pad;
+};
+#define QWZ_MONTX_F_NO_ACK	0x0001
+#define QWZ_MONTX_MAXFRAME	2400
 #define QWZ_MONCAP_F_RXDMA_ERR	0x0001	/* entrance ring: error push reason */
 #define QWZ_MONCAP_F_TRUNC	0x0002	/* frame longer than the record buffer */
 #define QWZ_MONCAP_F_NO_MPDU	0x0004	/* first buffer lacks the MPDU_START tag */
@@ -96,6 +110,13 @@ void	qwz_mon_capture_reo_mbuf(struct qwz_softc *, struct mbuf *);
  */
 int	qwz_mon_tx(int ops);		/* errno */
 extern uint32_t qwz_mon_tx_mode;
+/* debug.qwz.montxframe: a qwz_montx_hdr plus frame from userspace (errno). */
+int	qwz_mon_tx_frame(const void *buf, size_t len);
+/* debug.qwz.monpeer: "add xx:xx:xx:xx:xx:xx" or "del xx:...": a firmware peer
+ * on the capture vdev, for unicast data to that station (errno). */
+int	qwz_mon_peer(const char *cmd);
+/* debug.qwz.monmac (read-only): the capture vdev's MAC while active, else the card's. */
+void	qwz_mon_mac_str(char *out, size_t len);
 struct wmi_mgmt_tx_compl_event;
 /* qwz_wmi_process_mgmt_tx_comp(): 1 when the completion was one of ours. */
 int	qwz_mon_tx_compl(struct qwz_softc *, struct wmi_mgmt_tx_compl_event *);

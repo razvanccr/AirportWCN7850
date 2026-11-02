@@ -93,6 +93,45 @@ qwz_sysctl_montx(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_re
 	return qwz_mon_tx(v);
 }
 
+/* debug.qwz.montxframe: write a qwz_montx_hdr plus 802.11 frame to transmit it (M2). */
+static int
+qwz_sysctl_montxframe(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req)
+{
+	uint8_t buf[sizeof(struct qwz_montx_hdr) + QWZ_MONTX_MAXFRAME];
+	int err;
+
+	if (req->newptr == USER_ADDR_NULL)
+		return 0;	/* nothing to read back */
+	if (req->newlen > sizeof(buf))
+		return EINVAL;
+	err = SYSCTL_IN(req, buf, req->newlen);
+	if (err)
+		return err;
+	return qwz_mon_tx_frame(buf, req->newlen);
+}
+
+/* debug.qwz.monpeer: "add <mac>" / "del" for a firmware peer on the capture vdev. */
+static char qwz_mon_peer_str[32];
+static int
+qwz_sysctl_monpeer(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req)
+{
+	int err = sysctl_handle_string(oidp, qwz_mon_peer_str, sizeof(qwz_mon_peer_str), req);
+
+	if (err || req->newptr == USER_ADDR_NULL)
+		return err;
+	return qwz_mon_peer(qwz_mon_peer_str);
+}
+
+/* debug.qwz.monmac: the capture vdev's MAC (the AWDL address a node here must use). */
+static int
+qwz_sysctl_monmac(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req)
+{
+	char mac[18];
+
+	qwz_mon_mac_str(mac, sizeof(mac));
+	return sysctl_handle_string(oidp, mac, sizeof(mac), req);
+}
+
 /* debug.qwz.moncap: drains the capture ring as a stream of qwz_moncap_hdr records. */
 static int
 qwz_sysctl_moncap(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req)
@@ -125,6 +164,12 @@ SYSCTL_PROC(_debug_qwz, OID_AUTO, mon, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED
     0, 0, qwz_sysctl_mon, "I", "monitor-mode capture: channel to start, 0 to stop (Wi-Fi must be off)");
 SYSCTL_UINT(_debug_qwz, OID_AUTO, monflags, CTLFLAG_RW | CTLFLAG_LOCKED,
     &qwz_mon_flags, 0, "monitor-mode experiment flags (QWZ_MON_F_* in qwz_mon.h)");
+SYSCTL_PROC(_debug_qwz, OID_AUTO, monmac, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED,
+    0, 0, qwz_sysctl_monmac, "A", "the capture vdev's MAC: the AWDL address for a node on this card");
+SYSCTL_PROC(_debug_qwz, OID_AUTO, montxframe, CTLTYPE_OPAQUE | CTLFLAG_WR | CTLFLAG_LOCKED,
+    0, 0, qwz_sysctl_montxframe, "S", "transmit a frame from userspace (qwz_montx_hdr + 802.11 frame)");
+SYSCTL_PROC(_debug_qwz, OID_AUTO, monpeer, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, qwz_sysctl_monpeer, "A", "firmware peer on the capture vdev: 'add xx:xx:xx:xx:xx:xx' or 'del'");
 SYSCTL_PROC(_debug_qwz, OID_AUTO, montx, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     0, 0, qwz_sysctl_montx, "I", "monitor-mode transmit: 1 broadcast PSF copy once, 2 auto unicast reply, 4 unicast once");
 SYSCTL_STRING(_debug_qwz, OID_AUTO, monbssid, CTLFLAG_RW | CTLFLAG_LOCKED,
@@ -161,6 +206,9 @@ qwz_sysctl_register(qwz_sysctl_start_fn start, void *arg)
 	sysctl_register_oid(&sysctl__debug_qwz_monflags);
 	sysctl_register_oid(&sysctl__debug_qwz_monbssid);
 	sysctl_register_oid(&sysctl__debug_qwz_montx);
+	sysctl_register_oid(&sysctl__debug_qwz_monmac);
+	sysctl_register_oid(&sysctl__debug_qwz_montxframe);
+	sysctl_register_oid(&sysctl__debug_qwz_monpeer);
 	sysctl_register_oid(&sysctl__debug_qwz_moncap);
 #ifdef QWZ_DEBUG
 	sysctl_register_oid(&sysctl__debug_qwz_debug);
@@ -179,6 +227,9 @@ qwz_sysctl_unregister(void)
 	sysctl_unregister_oid(&sysctl__debug_qwz_debug);
 #endif
 	sysctl_unregister_oid(&sysctl__debug_qwz_moncap);
+	sysctl_unregister_oid(&sysctl__debug_qwz_monpeer);
+	sysctl_unregister_oid(&sysctl__debug_qwz_montxframe);
+	sysctl_unregister_oid(&sysctl__debug_qwz_monmac);
 	sysctl_unregister_oid(&sysctl__debug_qwz_montx);
 	sysctl_unregister_oid(&sysctl__debug_qwz_monbssid);
 	sysctl_unregister_oid(&sysctl__debug_qwz_monflags);

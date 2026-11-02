@@ -18,7 +18,7 @@ import struct
 import sys
 import time
 
-HDR = struct.Struct('<IIHBBIbBH')       # len, ts_ms, flags, decap, chan, seq, rssi, rate, pad
+HDR = struct.Struct('<IIHBBIbBH')       # len, ts_lo(us), flags, decap, chan, seq, rssi, rate, ts_hi
 SKIP = 0xffffffff
 F_RXDMA_ERR, F_TRUNC, F_NO_MPDU, F_CONT, F_DROPCLASS, F_FCS, F_HDR_SYNTH, F_WMI, F_REO = (
     1, 2, 4, 8, 16, 32, 64, 128, 256)
@@ -45,7 +45,8 @@ def drain(buf):
 def records(blob):
     off = 0
     while off + HDR.size <= len(blob):
-        length, ts, flags, decap, chan, seq, rssi, rate, _ = HDR.unpack_from(blob, off)
+        length, ts_lo, flags, decap, chan, seq, rssi, rate, ts_hi = HDR.unpack_from(blob, off)
+        ts = (ts_hi << 32 | ts_lo) / 1000.0   # milliseconds, from microseconds
         if length == SKIP:
             break
         off += HDR.size
