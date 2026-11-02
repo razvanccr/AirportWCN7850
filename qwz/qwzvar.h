@@ -1799,7 +1799,7 @@ struct qwz_pdev_dp {
 };
 
 struct qwz_txmgmt_queue {
-	struct qwz_tx_data data[8];
+	struct qwz_tx_data data[64];	/* M3: 8 overflowed during an AirDrop transfer (owly: radio full 769) */
 	int cur;
 	int queued;
 };
@@ -2153,7 +2153,7 @@ struct qwz_softc {
 	int				 mon_self_peer;	/* AP vdev's own peer entry exists */
 	int				 mon_sender_peer;	/* raw firmware peer for mon_sender_addr */
 	uint8_t				 mon_sender_addr[IEEE80211_ADDR_LEN];
-	uint8_t				 mon_tx_kind[8];	/* per transmit slot: 0 replay, 1 user mgmt, 2 user data, 3 user ctrl */
+	uint8_t				 mon_tx_kind[64];	/* per transmit slot: 0 replay, 1 user mgmt, 2 user data, 3 user ctrl */
 	struct {
 		uint32_t entries, mpdus, frames, bufs, mgmt;
 		uint32_t reo, reo_err, wbm_err;

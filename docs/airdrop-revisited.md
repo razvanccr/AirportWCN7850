@@ -547,3 +547,171 @@ needs a BLE advertisement to wake Apple receivers, owly's `btleplug` path
 should work with the BluetoothWCN7850 kext), queue depth and rate control,
 RSSI from the status ring, the receiver on the daemon's own ports so one
 command does it all.
+
+## M3, sending: blocked on the Bluetooth wake-up (2026-11-02)
+
+Goal: `owly send` from this Mac to the iPhone. Everything up to the
+iPhone's AirDrop port works; the port never opens, because the iPhone wakes
+its receiver only on a sender's BLE advertisement (SPEC BLE-1), and this
+Mac cannot put one on the air.
+
+### What works
+
+- `owly send -i feth0 --mac <iPhone AWDL MAC> file` (DISC-5: knock at the
+  peer's link-local address, port 8770, no mDNS needed) reaches the iPhone:
+  the knock went from "No route to host" to **"Connection refused"** once
+  the neighbour entry held, i.e. our TCP SYN crossed AWDL and the iPhone
+  answered with RST. The whole network path is proven in both directions.
+- Neighbour entries: macOS's `ndp -d` leaves a permanent entry
+  "(incomplete)", which fails every connect with EHOSTUNREACH; `peer_up`
+  now deletes before setting and `peer_down` keeps the entry (an idle
+  phone flaps as a peer every few seconds).
+- The kext's management-transmit queue is 64 slots now (build b24c906f,
+  not yet installed; 8 overflowed during the M2 transfer).
+- The card's MAC changed between runs (ac:f2:3c:8d:a6:9d, then
+  96:7f:00:1b:76:16: macOS rotates the station's address when Wi-Fi is
+  toggled, and the capture vdev takes the station's); harmless, the AWDL
+  address follows.
+
+### What does not: raw HCI on macOS 26
+
+`owly-radio-macos::hci` sends the AirDrop advert through IOBluetooth's
+private `BluetoothHCIRequestCreate` / `BluetoothHCISendRawCommand` /
+`BluetoothHCIRequestDelete` (the InternalBlue path; prototypes in its
+`IOBluetoothHostController.h`). Every call returns 0, as user and as root,
+in three variants (legacy advertising from the public address, legacy from a
+random static address re-sent every 100 ms, and an extended-advertising set
+of our own on handle 7), and **nothing appears on the air**: nRF Connect on
+the iPhone, next to the Mac, listed the MacBook, AirPods and neighbours but
+never a `4C 00 05 12` advert, and the iPhone's port stayed closed through
+four 90-150 s attempts. A nonsense opcode (0x3fff) and wrong parameter
+lengths also return 0: bluetoothd (which owns the controller through
+IOUSBLib on this BlueToolFixup setup) accepts the raw request and drops it.
+`log show` for bluetoothd records only its own scanning. macOS's own
+sharing daemon would send the genuine advert, but only with Wi-Fi powered
+on, which the capture cell forbids (Finder's AirDrop window says "Wi-Fi
+Off"). CoreBluetooth's peripheral API refuses manufacturer data. The
+iPhone's AirDrop settings page and Control Center do not open the port
+either.
+
+Apparent earlier wake (peer appearing 28 s into the first advert) was the
+phone being unlocked, not the advert: no later advert, in any variant,
+produced one.
+
+### Routes left for the wake-up
+
+1. **A BLE controller bluetoothd does not own.** An nRF52840 USB dongle
+   running Zephyr's `hci_uart` sample over USB CDC-ACM shows up as a serial
+   port (`/dev/cu.usbmodem*`), which bluetoothd ignores; owly speaks H4 to
+   it (three commands: LE Set Advertising Parameters, Data, Enable). About
+   10 EUR, no root, no kext, and the same code would serve Linux hosts
+   without BlueZ. A dongle with the standard Bluetooth USB class would be
+   seized by bluetoothd instead.
+2. **Let macOS believe Wi-Fi is on.** A kext mode where `ifconfig up` with
+   the cell active keeps the station idle instead of starting it: Wi-Fi
+   shows powered on, sharingd sends the real AirDrop advert when the share
+   sheet or Finder's AirDrop window is open, the iPhone wakes, `owly send`
+   knocks. More reboot cycles, and macOS's scan/join attempts must be
+   stubbed; this is also a step towards M4.
+3. The iPhone's own share sheet: with it open the phone is on AWDL and
+   `owly receive` works (M2), but its receiving port still needs the BLE
+   wake, so this does not help sending to it.
+
+### State of the code
+
+- owly-radio-macos: `hci.rs` (legacy, refreshed and extended advertising,
+  raw command), `bin/owly-ble.rs` (test tool, `--raw opcode:hex`), feth
+  neighbour fixes; owly-cli: `machci.rs` as the macOS advertiser (kept:
+  harmless, and right if a future macOS lets the commands through), the
+  knock prints each distinct error.
+- `ble-modes.sh` next to the owly checkout cycles the three variants for a
+  phone-side scanner.
+
+## M3 complete, and native AirDrop sending with it (2026-11-02)
+
+With the kext's **hold mode** (`debug.qwz.monhold=1`: macOS turning Wi-Fi on
+keeps the capture cell and marks the interface up without starting the
+station; scans complete empty, joins are refused) and `owlymac up --channel 6
+--wifi-on` (which sets the hold and powers Wi-Fi on through `networksetup`),
+Finder's AirDrop window on this Hackintosh listed "RazvanC iPhone", and a
+photo dragged onto it arrived on the phone. Nothing of owly's AirDrop code
+was involved in that transfer: macOS's own sharing daemon did it.
+
+What happened, in order:
+
+1. Wi-Fi reports powered on, so sharingd treats AirDrop as available and,
+   with the AirDrop window open, sends its genuine Bluetooth advertisement
+   (the thing no userspace path could do: raw HCI is dropped on macOS 26).
+2. The iPhone wakes its receiver, joins AWDL (the daemon shows it as a peer
+   within seconds) and announces `_airdrop._tcp` over AWDL.
+3. owly's node delivers the phone's mDNS onto `feth0`; mDNSResponder listens
+   on every interface, so sharingd's Bonjour browse sees the phone, with no
+   `awdl0` anywhere.
+4. sharingd connects to the phone's link-local address on `feth0` (the
+   neighbour entry the daemon installed) and runs the AirDrop HTTPS exchange;
+   the node carries the TCP stream over AWDL. The phone showed the accept
+   prompt and the file.
+
+The phone appears twice in the window after a while: it rotates its AirDrop
+service identity every few minutes and the old Bonjour record lingers until
+it expires; either icon works.
+
+Transfer stats: with the 64-slot transmit queue, `radio full 0` throughout
+(the 8-slot queue overflowed 769 times in M2's transfer).
+
+Kext changes (build d8b8cbca, installed): `qwz_mon_hold` and
+`qwz_mon_holding()`, checked in `ItlQwz::enableGated` / `disableGated`
+(flags only, no `qwz_init` / `qwz_stop` while holding) and in the WCL scan
+and join entry points; `qwz_mon.h` got C linkage for C++ includers;
+`qwz_txmgmt_queue` is 64 deep. Daemon: `--wifi-on`, and the neighbour-entry
+fixes from the M3 attempts.
+
+Open: native receiving (the phone's share sheet listing this Mac and
+sharingd accepting), which would make `owly receive` unnecessary too; AWDL
+peers other than one iPhone; what macOS does with the "on but no networks"
+Wi-Fi over time (wifid rescans every few seconds and gets nothing); leaving
+the hold needs Wi-Fi off, `monhold=0`, `mon=0`, which `owlymac`'s Ctrl-C
+does in that order.
+
+### Native receiving: not yet (2026-11-02, 03:15)
+
+The iPhone's share sheet finds nobody. Bonjour publishes this Mac's own
+`_airdrop._tcp` record (sharingd's, instance befbb5263e0a, port 8770 on
+every interface) on loopback only: sharingd registers it with
+`kDNSServiceFlagsIncludeAWDL`, and mDNSResponder maps that onto an AWDL
+interface through its D2D plugin ("call AWDL and NAN plugins since
+kDNSServiceFlagsIncludeAWDL is set"), of which there is none.
+
+Tried:
+
+1. `owly announce -i feth0 --port 8770`: a record of ours pointing at
+   sharingd's port. The iPhone resolved it (it asked for the host's A
+   record over feth0, as it did in the working M2 case) and showed nothing.
+   Whether it connected to 8770 and sharingd refused, or whether it never
+   connected, is unverified (no tcpdump run yet; sharingd's log is
+   redacted).
+2. Kext `debug.qwz.awdlif=feth0` (build 7d40358d, installed; daemon
+   `--awdl-flag`): `ifnet_set_eflags(IFEF_AWDL)` works from the kext (the
+   symbol resolves in com.apple.kpi.bsd; eflags 0x40010080 -> 0x401f0080,
+   xnu adding LOCALNET_PRIVATE, IPV6_ND6ALT and RESTRICTED_RECV as its
+   `IFEF_AWDL_MASK` says). After a down/up of feth0, mDNSResponder still
+   publishes the record on loopback only. xnu's `if_functional_type()`
+   reports WIFI_AWDL only for an interface whose subfamily is Wi-Fi; a
+   `feth` is not, so to Network.framework, NECP, mDNSResponder and sharingd
+   it is still a wired interface with odd flags. The subfamily is fixed at
+   `ifnet_allocate_extended`; no KPI changes it later.
+
+So the AWDL side of native receiving needs an interface the kext allocates
+itself: family Ethernet, subfamily Wi-Fi, named `awdl0`, with `IFEF_AWDL`,
+its output handed to the daemon and the daemon's frames injected with
+`ifnet_input` (a kernel-control socket, utun-style, or a BPF tap on a
+companion interface). That is M4 proper: the `feth` pair goes away, the
+node's Netif talks to the kext, and sharingd, mDNSResponder and the AirDrop
+window all see a real `awdl0`. Native sending already works without it.
+
+Open question to settle first, cheaply, with `sudo tcpdump -ni feth0 'tcp
+port 8770'` while the iPhone browses against `owly announce`: does sharingd
+accept a connection that does not arrive on an AWDL functional-type
+interface? If it does, the `awdl0` ifnet is only needed for the record
+publication, and a simpler route (publishing sharingd's record from
+userspace, with a copy of its TXT) might do.

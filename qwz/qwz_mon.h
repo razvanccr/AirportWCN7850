@@ -27,6 +27,10 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct qwz_softc;
 
 /* Record header in the capture stream (debug.qwz.moncap), little-endian,
@@ -47,7 +51,7 @@ struct qwz_moncap_hdr {
  * M2: frames from userspace (debug.qwz.montxframe, opaque write): this
  * header, then the 802.11 frame without FCS. Sent through the firmware's
  * management-transmit command on the capture vdev (AP type with its self
- * peer). ENOSPC when the eight-slot queue is full: try again later.
+ * peer). ENOSPC when the 64-slot queue is full: try again later.
  */
 struct qwz_montx_hdr {
 	uint16_t flags;		/* QWZ_MONTX_F_* */
@@ -85,6 +89,24 @@ struct qwz_montx_hdr {
 #define QWZ_MON_F_BEACON	0x4000	/* give the AP vdev a minimal hidden-SSID beacon template before vdev up */
 #define QWZ_MON_F_PEER_SENDER	0x8000	/* raw firmware peer for the first PSF sender heard (unicast needs?) */
 extern uint32_t qwz_mon_flags;
+/*
+ * M3: debug.qwz.monhold. While set and the cell is active, macOS turning
+ * Wi-Fi on does not start the station: the interface reports UP|RUNNING,
+ * scans complete empty, joins are refused, and the cell keeps running. Wi-Fi
+ * then shows as powered on, which is what sharingd needs before it sends the
+ * AirDrop Bluetooth advertisement that wakes a phone's receiver.
+ */
+extern uint32_t qwz_mon_hold;
+struct ieee80211com;
+int	qwz_mon_holding(struct ieee80211com *);	/* hold set and cell active */
+/*
+ * M3/M4: debug.qwz.awdlif = "feth0" | "-feth0". Sets or clears IFEF_AWDL
+ * (xnu if_private.h: 0x00100000, which drags LOCALNET_PRIVATE, IPV6_ND6ALT
+ * and RESTRICTED_RECV along) on that interface, so mDNSResponder and
+ * sharingd treat it as awdl0: Bonjour then announces AirDrop there and
+ * sharingd accepts connections from it. Returns errno.
+ */
+int	qwz_mon_awdlif(const char *cmd);
 /* debug.qwz.monbssid: "xx:xx:xx:xx:xx:xx"; when set, vdev_up uses it as the BSSID
  * (the firmware's filter-pass class), and the flags above build on it. Empty: own MAC. */
 extern char qwz_mon_bssid_str[32];	/* room for the terminator sysctl(8) sends */
@@ -126,5 +148,9 @@ int	qwz_mon_set(int chan);		/* errno; 0 stops */
 int	qwz_mon_status(void);		/* channel while active, else 0 */
 size_t	qwz_mon_cap_pending(void);	/* bytes a drain would return */
 size_t	qwz_mon_cap_drain(void *buf, size_t max);	/* whole records only */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* QWZ_MON_H */

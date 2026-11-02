@@ -58,6 +58,52 @@ static int qwz_mon_parse_mac(const char *, uint8_t *);
 static struct qwz_softc *qwz_mon_sc;	/* the one softc; set by qwz_mon_attach() */
 
 uint32_t qwz_mon_tx_mode;		/* bit 2: auto unicast reply */
+uint32_t qwz_mon_hold;			/* debug.qwz.monhold (qwz_mon.h) */
+
+/* Private KPI (xnu kpi_interface.h under KERNEL_PRIVATE); C linkage. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern errno_t ifnet_set_eflags(ifnet_t, u_int32_t new_flags, u_int32_t mask);
+extern u_int32_t ifnet_eflags(ifnet_t);
+#ifdef __cplusplus
+}
+#endif
+#define QWZ_IFEF_AWDL	0x00100000
+
+int
+qwz_mon_awdlif(const char *cmd)
+{
+	ifnet_t ifp;
+	const char *name = cmd;
+	int clear = 0, err;
+	u_int32_t before, after;
+
+	if (name[0] == '-') {
+		clear = 1;
+		name++;
+	}
+	if (name[0] == 0)
+		return EINVAL;
+	err = ifnet_find_by_name(name, &ifp);
+	if (err)
+		return err;
+	before = ifnet_eflags(ifp);
+	err = ifnet_set_eflags(ifp, clear ? 0 : QWZ_IFEF_AWDL, QWZ_IFEF_AWDL);
+	after = ifnet_eflags(ifp);
+	printf("qwz: mon: awdlif %s: %s IFEF_AWDL -> %d, eflags 0x%08x -> 0x%08x\n",
+	    name, clear ? "clear" : "set", err, before, after);
+	ifnet_release(ifp);
+	return err;
+}
+
+int
+qwz_mon_holding(struct ieee80211com *ic)
+{
+	struct qwz_softc *sc = ic ? (struct qwz_softc *)ic->ic_if.if_softc : NULL;
+
+	return sc != NULL && qwz_mon_hold != 0 && sc->mon_active;
+}
 static uint8_t mon_psf[512];		/* last PSF heard, without FCS */
 static size_t mon_psf_len;
 static uint8_t mon_psf_src[6];

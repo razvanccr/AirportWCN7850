@@ -9,6 +9,7 @@
 #include "qwz_compat.h"
 #include "qwzreg.h"
 #include "qwzvar.h"
+#include "qwz_mon.h"
 #undef malloc
 #undef free
 #undef wakeup
@@ -256,7 +257,11 @@ ItlQwz::enableGated(OSObject *, void *arg0, void *, void *, void *)
 	/* What qwz_ioctl(SIOCSIFFLAGS) does when the interface goes up. */
 	rw_enter_write(&that->sc->ioctl_rwl);
 	ifp->if_flags |= IFF_UP;
-	if (!(ifp->if_flags & IFF_RUNNING))
+	if (qwz_mon_holding(&that->sc->sc_ic)) {
+		/* M3 hold: Wi-Fi "on" over the running cell, no station. */
+		ifp->if_flags |= IFF_RUNNING;
+		QWZLOG("mon: hold: interface up without the station");
+	} else if (!(ifp->if_flags & IFF_RUNNING))
 		err = qwz_init(ifp);
 	rw_exit(&that->sc->ioctl_rwl);
 	if (err)
@@ -278,7 +283,10 @@ ItlQwz::disableGated(OSObject *, void *arg0, void *, void *, void *)
 
 	rw_enter_write(&that->sc->ioctl_rwl);
 	ifp->if_flags &= ~IFF_UP;
-	if (ifp->if_flags & IFF_RUNNING)
+	if (qwz_mon_holding(&that->sc->sc_ic)) {
+		ifp->if_flags &= ~IFF_RUNNING;
+		QWZLOG("mon: hold: interface down, the cell stays");
+	} else if (ifp->if_flags & IFF_RUNNING)
 		qwz_stop(ifp);
 	rw_exit(&that->sc->ioctl_rwl);
 	return kIOReturnSuccess;

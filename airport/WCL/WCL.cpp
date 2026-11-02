@@ -15,6 +15,7 @@
 #include <net80211/ieee80211_ioctl.h>
 #include <net80211/ieee80211_priv.h>
 #include <crypto/sha1.h>
+extern "C" int qwz_mon_holding(struct ieee80211com *);	// qwz/qwz_mon.h (M3 hold)
 
 extern IOCommandGate *_fCommandGate;
 
@@ -200,6 +201,12 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLScan(apple80211ScanRequest *reque
     ieee80211com *ic = fHalService->get80211Controller();
     if (!(ic->ic_if.if_flags & IFF_RUNNING))
         return kIOReturnNotReady;
+    if (qwz_mon_holding(ic)) {
+        // M3 hold: the radio is the AWDL cell; every scan finds nothing.
+        scanPending = true;
+        finishWCLScan(kIOReturnSuccess);
+        return kIOReturnSuccess;
+    }
     if (scanPending || joinPending || (ic->ic_flags & IEEE80211_F_BGSCAN))
         return kIOReturnBusy;
     if (ic->ic_state == IEEE80211_S_AUTH || ic->ic_state == IEEE80211_S_ASSOC)
@@ -380,6 +387,8 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLJoin(apple80211AssocCandidates *r
     if (!AirportWCL::decodeJoin(request, 0x2cc, join)) {
         return kIOReturnBadArgument;
     }
+    if (qwz_mon_holding(fHalService->get80211Controller()))
+        return kIOReturnNotReady; // M3 hold: no station to join with
     return startWCLJoin(join);
 }
 
