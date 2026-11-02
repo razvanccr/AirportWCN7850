@@ -872,3 +872,27 @@ nine seconds after Wi-Fi comes on (the router answers over en3, a page
 fetch bound to en3 succeeds). `networksetup -getairportnetwork` still
 says "not associated" even when joined, as it did before any cell: a
 separate, cosmetic gap in the SSID report.
+
+## M5: AirDrop both ways from one command (2026-11-02, evening)
+
+Native receiving stays blocked on a Skywalk-native awdl0 (the transfer
+service binds only through the nexus, and the nexus garbles the link), so
+the deliverable is a hybrid: macOS's own AirDrop sends, owly receives.
+
+```
+sudo owlymac up --wifi-on --receive ~/Downloads --accept    # from Terminal.app
+```
+
+brings the cell up on channel 6, holds it with Wi-Fi shown on (so
+sharingd sends the Bluetooth advert and the Finder AirDrop window lists
+the iPhone), and runs `owly receive` on feth0 as the sudo user, announced
+as the host name. Verified: a file from the Finder window reaches the
+iPhone; photos shared from the iPhone land in Downloads without a
+prompt, three in a row. Terminal.app matters: the receiver needs the
+Local Network permission, which a shell inside another app lacks.
+
+A multi-file share then sat on "Waiting" with no trace on the receiver.
+The receiver dropped a sender's fifth connection silently once four
+earlier ones were still open (an iPhone keeps them between transfers);
+owly 5c815b9 replaces the quietest idle one instead and logs refusals.
+Whether that was the whole story is the next test.
